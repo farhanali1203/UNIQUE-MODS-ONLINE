@@ -7,7 +7,6 @@ import os
 import hashlib
 import sqlite3
 import base64
-import re
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
@@ -160,17 +159,13 @@ def insert_key(key, device, expiry, user_id, username):
 
 def update_key_used(key, used_by_user_id, used_by_username):
     conn = get_db()
-    # Update key
     conn.execute('''
         UPDATE keys SET used = 1, used_by = ?, used_at = ? WHERE key = ?
     ''', (used_by_username, datetime.now().isoformat(), key))
-    
-    # Log usage history
     conn.execute('''
         INSERT INTO key_usage_history (key, used_by_user_id, used_by_username, used_at)
         VALUES (?, ?, ?, ?)
     ''', (key, used_by_user_id, used_by_username, datetime.now().isoformat()))
-    
     conn.commit()
     conn.close()
 
@@ -191,21 +186,6 @@ def get_key_usage_history(key):
     history = conn.execute('SELECT * FROM key_usage_history WHERE key = ? ORDER BY used_at DESC', (key,)).fetchall()
     conn.close()
     return [dict(row) for row in history]
-
-def can_user_use_key(key_record, user_id):
-    """Check if user is allowed to use this key"""
-    if not key_record:
-        return False, "Key not found"
-    
-    # Admin can use any key
-    if is_admin():
-        return True, "Admin access"
-    
-    # Only the owner can use their own key
-    if key_record['user_id'] == user_id:
-        return True, "Owner access"
-    
-    return False, "You are not the owner of this key"
 
 # ============ HTML ============
 
@@ -228,6 +208,7 @@ LOGIN_PAGE = '''
         .btn { width: 100%; padding: 14px; background: #FFD700; color: #0a0a0a; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; transition: 0.3s; }
         .btn:hover { background: #e6c200; }
         .error { color: #ff4444; text-align: center; margin-top: 12px; font-size: 14px; }
+        .success { color: #00ff88; text-align: center; margin-top: 12px; font-size: 14px; }
         .footer { text-align: center; margin-top: 20px; color: #666; font-size: 12px; }
         .footer a { color: #FFD700; text-decoration: none; }
         .made { text-align: center; color: #444; font-size: 11px; margin-top: 15px; }
@@ -278,7 +259,7 @@ LOGIN_PAGE = '''
         <div class="error">{{ signup_error }}</div>
         {% endif %}
         {% if signup_success %}
-        <div class="success" style="color:#00ff88;text-align:center;margin-top:12px;font-size:14px;">{{ signup_success|safe }}</div>
+        <div class="success">{{ signup_success|safe }}</div>
         {% endif %}
         <form method="POST" action="/signup">
             <div class="input-group">
@@ -493,7 +474,7 @@ USER_DASHBOARD = '''
         .btn-telegram:hover { background: #006699; }
         .join-btn { display: inline-block; background: #0088cc; color: white; padding: 10px 24px; border-radius: 6px; text-decoration: none; font-weight: bold; margin: 10px 0; }
         .join-btn:hover { background: #006699; }
-        .tabs { display: flex; margin-bottom: 20px; border-bottom: 1px solid #333; }
+        .tabs { display: flex; margin-bottom: 20px; border-bottom: 1px solid #333; flex-wrap: wrap; }
         .tab { padding: 10px 20px; color: #888; cursor: pointer; border-bottom: 3px solid transparent; transition: 0.3s; }
         .tab.active { color: #FFD700; border-bottom-color: #FFD700; }
         .tab:hover { color: #FFD700; }
@@ -511,7 +492,6 @@ USER_DASHBOARD = '''
         .key-item .status-active { color: #00ff88; }
         .success { color: #00ff88; text-align: center; margin-top: 12px; font-size: 14px; }
         .error { color: #ff4444; text-align: center; margin-top: 12px; font-size: 14px; }
-        .owner-badge { background: #6c5ce7; color: white; padding: 2px 8px; border-radius: 4px; font-size: 10px; }
     </style>
 </head>
 <body>
@@ -534,23 +514,19 @@ USER_DASHBOARD = '''
         <div class="tab" onclick="showTab('profile')">Profile</div>
     </div>
 
-    <!-- Generate Key Tab -->
     <div id="generate-tab" class="tab-content active">
         <div class="card">
             <h2>Generate Your Own Key</h2>
             <p>Generate a unique key for your device. You can only use keys you generate.</p>
-            <form id="generateForm" onsubmit="generateKey(event)">
-                <div class="input-group">
-                    <input type="text" id="device" placeholder="Device ID" required>
-                    <input type="text" id="expire" placeholder="Expiry (e.g. 18-August-2026)" required>
-                    <button type="submit">Generate Key</button>
-                </div>
-            </form>
+            <div class="input-group">
+                <input type="text" id="device" placeholder="Device ID" required>
+                <input type="text" id="expire" placeholder="Expiry (e.g. 18-August-2026)" required>
+                <button onclick="generateKey()">Generate Key</button>
+            </div>
             <div id="generateResult"></div>
         </div>
     </div>
 
-    <!-- My Keys Tab -->
     <div id="mykeys-tab" class="tab-content">
         <div class="card">
             <h2>My Generated Keys</h2>
@@ -560,7 +536,6 @@ USER_DASHBOARD = '''
         </div>
     </div>
 
-    <!-- Use Key Tab -->
     <div id="use-tab" class="tab-content">
         <div class="card">
             <h2>Use Your Key</h2>
@@ -573,7 +548,6 @@ USER_DASHBOARD = '''
         </div>
     </div>
 
-    <!-- Profile Tab -->
     <div id="profile-tab" class="tab-content">
         <div class="card">
             <h2>My Profile</h2>
@@ -607,17 +581,19 @@ function showTab(tab) {
     }
 }
 
-function generateKey(e) {
-    e.preventDefault();
+function generateKey() {
     const device = document.getElementById('device').value;
     const expire = document.getElementById('expire').value;
     const resultDiv = document.getElementById('generateResult');
     
+    if (!device || !expire) {
+        resultDiv.innerHTML = '<div class="error">Please fill all fields</div>';
+        return;
+    }
+    
     resultDiv.innerHTML = '<p style="color:#FFD700;">Generating...</p>';
     
-    fetch('/api/key/generate?device=' + encodeURIComponent(device) + '&expire=' + encodeURIComponent(expire), {
-        method: 'GET'
-    })
+    fetch('/api/key/generate?device=' + encodeURIComponent(device) + '&expire=' + encodeURIComponent(expire))
     .then(res => res.json())
     .then(data => {
         if (data.error) {
@@ -740,6 +716,7 @@ ADMIN_DASHBOARD = '''
         .key-item .info { color: #888; font-size: 12px; }
         .key-item .status-used { color: #ff4444; }
         .key-item .status-active { color: #00ff88; }
+        .key-item .owner { color: #6c5ce7; font-size: 12px; }
         .footer { text-align: center; margin-top: 30px; color: #444; font-size: 12px; }
         .footer a { color: #FFD700; text-decoration: none; }
         .made { text-align: center; color: #333; font-size: 11px; margin-top: 10px; }
@@ -760,8 +737,6 @@ ADMIN_DASHBOARD = '''
         .tab-content.active { display: block; }
         .success { color: #00ff88; text-align: center; margin-top: 12px; font-size: 14px; }
         .error { color: #ff4444; text-align: center; margin-top: 12px; font-size: 14px; }
-        .owner-badge { background: #6c5ce7; color: white; padding: 2px 8px; border-radius: 4px; font-size: 10px; }
-        .key-item .owner { color: #6c5ce7; font-size: 12px; }
     </style>
 </head>
 <body>
@@ -785,54 +760,38 @@ ADMIN_DASHBOARD = '''
         <div class="tab" onclick="showTab('connect')">Connect API</div>
     </div>
 
-    <!-- Generate Key Tab -->
     <div id="generate-tab" class="tab-content active">
         <div class="card">
             <h2>Generate Random Key</h2>
-            <form action="/api/key/generate" method="GET">
-                <div class="input-group">
-                    <input type="text" name="device" placeholder="Device ID" required>
-                    <input type="text" name="expire" placeholder="Expiry (e.g. 18-August-2026)" required>
-                    <button type="submit">Generate</button>
-                </div>
-            </form>
+            <div class="input-group">
+                <input type="text" id="adminDevice" placeholder="Device ID" required>
+                <input type="text" id="adminExpire" placeholder="Expiry (e.g. 18-August-2026)" required>
+                <button onclick="adminGenerateKey()">Generate</button>
+            </div>
+            <div id="adminGenerateResult"></div>
         </div>
 
         <div class="card">
             <h2>Generate Custom Key</h2>
-            <form action="/api/key/generate" method="GET">
-                <div class="input-group">
-                    <input type="text" name="device" placeholder="Device ID" required>
-                    <input type="text" name="expire" placeholder="Expiry (e.g. 18-August-2026)" required>
-                    <input type="text" name="custom_key" placeholder="Enter Custom Key" required>
-                    <button type="submit">Generate</button>
-                </div>
-            </form>
+            <div class="input-group">
+                <input type="text" id="adminCustomDevice" placeholder="Device ID" required>
+                <input type="text" id="adminCustomExpire" placeholder="Expiry (e.g. 18-August-2026)" required>
+                <input type="text" id="adminCustomKey" placeholder="Enter Custom Key" required>
+                <button onclick="adminGenerateCustomKey()">Generate</button>
+            </div>
+            <div id="adminCustomResult"></div>
         </div>
     </div>
 
-    <!-- All Keys Tab -->
     <div id="allkeys-tab" class="tab-content">
         <div class="card">
             <h2>All Keys</h2>
-            <div class="key-list">
-                {% for key in keys %}
-                <div class="key-item">
-                    <span class="key">{{ key.key }}</span>
-                    <span class="info">Device: {{ key.device }} | Expires: {{ key.expiry }}</span>
-                    <span class="owner">Owner: {{ key.owner_username }}</span>
-                    <span class="{% if key.used %}status-used{% else %}status-active{% endif %}">
-                        {% if key.used %}USED{% else %}ACTIVE{% endif %}
-                    </span>
-                </div>
-                {% else %}
-                <p style="color:#666;text-align:center;">No keys</p>
-                {% endfor %}
+            <div id="allKeysList">
+                <p style="color:#666;">Loading keys...</p>
             </div>
         </div>
     </div>
 
-    <!-- Statistics Tab -->
     <div id="stats-tab" class="tab-content">
         <div class="card">
             <h2>Statistics</h2>
@@ -845,7 +804,6 @@ ADMIN_DASHBOARD = '''
         </div>
     </div>
 
-    <!-- Connect API Tab -->
     <div id="connect-tab" class="tab-content">
         <div class="card">
             <h2>API Connect Status</h2>
@@ -873,6 +831,103 @@ function showTab(tab) {
     document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
     document.getElementById(tab + '-tab').classList.add('active');
     document.querySelector('.tab[onclick="showTab(\'' + tab + '\')"]').classList.add('active');
+    
+    if (tab === 'allkeys') {
+        loadAllKeys();
+    }
+}
+
+function adminGenerateKey() {
+    const device = document.getElementById('adminDevice').value;
+    const expire = document.getElementById('adminExpire').value;
+    const resultDiv = document.getElementById('adminGenerateResult');
+    
+    if (!device || !expire) {
+        resultDiv.innerHTML = '<div class="error">Please fill all fields</div>';
+        return;
+    }
+    
+    resultDiv.innerHTML = '<p style="color:#FFD700;">Generating...</p>';
+    
+    fetch('/api/key/generate?device=' + encodeURIComponent(device) + '&expire=' + encodeURIComponent(expire))
+    .then(res => res.json())
+    .then(data => {
+        if (data.error) {
+            resultDiv.innerHTML = '<div class="error">Error: ' + data.error + '</div>';
+        } else {
+            resultDiv.innerHTML = '<div class="success">Key generated: <strong style="color:#00ff88;">' + data.key + '</strong><br>Device: ' + data.device + '<br>Expires: ' + data.expiry + '</div>';
+            document.getElementById('adminDevice').value = '';
+            document.getElementById('adminExpire').value = '';
+            loadAllKeys();
+        }
+    })
+    .catch(err => {
+        resultDiv.innerHTML = '<div class="error">Error: ' + err.message + '</div>';
+    });
+}
+
+function adminGenerateCustomKey() {
+    const device = document.getElementById('adminCustomDevice').value;
+    const expire = document.getElementById('adminCustomExpire').value;
+    const customKey = document.getElementById('adminCustomKey').value;
+    const resultDiv = document.getElementById('adminCustomResult');
+    
+    if (!device || !expire || !customKey) {
+        resultDiv.innerHTML = '<div class="error">Please fill all fields</div>';
+        return;
+    }
+    
+    resultDiv.innerHTML = '<p style="color:#FFD700;">Generating...</p>';
+    
+    fetch('/api/key/generate?device=' + encodeURIComponent(device) + '&expire=' + encodeURIComponent(expire) + '&custom_key=' + encodeURIComponent(customKey))
+    .then(res => res.json())
+    .then(data => {
+        if (data.error) {
+            resultDiv.innerHTML = '<div class="error">Error: ' + data.error + '</div>';
+        } else {
+            resultDiv.innerHTML = '<div class="success">Custom key generated: <strong style="color:#00ff88;">' + data.key + '</strong><br>Device: ' + data.device + '<br>Expires: ' + data.expiry + '</div>';
+            document.getElementById('adminCustomDevice').value = '';
+            document.getElementById('adminCustomExpire').value = '';
+            document.getElementById('adminCustomKey').value = '';
+            loadAllKeys();
+        }
+    })
+    .catch(err => {
+        resultDiv.innerHTML = '<div class="error">Error: ' + err.message + '</div>';
+    });
+}
+
+function loadAllKeys() {
+    const listDiv = document.getElementById('allKeysList');
+    listDiv.innerHTML = '<p style="color:#666;">Loading...</p>';
+    
+    fetch('/api/keys/all')
+    .then(res => res.json())
+    .then(data => {
+        if (data.error) {
+            listDiv.innerHTML = '<p style="color:#ff4444;">Error: ' + data.error + '</p>';
+            return;
+        }
+        
+        if (data.keys && data.keys.length > 0) {
+            let html = '';
+            data.keys.forEach(key => {
+                const status = key.used ? '<span class="status-used">USED</span>' : '<span class="status-active">ACTIVE</span>';
+                html += '<div class="key-item">' +
+                    '<span class="key">' + key.key + '</span>' +
+                    '<span class="info">Device: ' + key.device + ' | Expires: ' + key.expiry + '</span>' +
+                    '<span class="owner">Owner: ' + key.owner_username + '</span>' +
+                    status +
+                '</div>';
+            });
+            listDiv.innerHTML = html;
+        } else {
+            listDiv.innerHTML = '<p style="color:#666;">No keys found</p>';
+        }
+    })
+    .catch(err => {
+        listDiv.innerHTML = '<p style="color:#ff4444;">Error loading keys</p>';
+    });
 }
 
 function checkAPI() {
@@ -898,8 +953,9 @@ function checkAPI() {
     });
 }
 
-// Auto check API on page load
+// Load data on page load
 document.addEventListener('DOMContentLoaded', function() {
+    loadAllKeys();
     checkAPI();
 });
 </script>
@@ -957,7 +1013,7 @@ USERS_PAGE = '''
                     <span class="admin-badge">ADMIN</span>
                     {% endif %}
                     {% if user.agreed_to_terms == 1 %}
-                    <span class="agreed-badge">Agreed to Terms</span>
+                    <span class="agreed-badge">Agreed</span>
                     {% else %}
                     <span class="not-agreed-badge">Not Agreed</span>
                     {% endif %}
@@ -1119,7 +1175,6 @@ def telegram():
 
 # ============ API ENDPOINTS ============
 
-# 1. CONNECT - Check API status
 @app.route('/api/connect', methods=['GET'])
 def api_connect():
     if not is_logged_in():
@@ -1132,7 +1187,6 @@ def api_connect():
         'is_admin': is_admin()
     })
 
-# 2. GENERATE KEY - User generates their own key
 @app.route('/api/key/generate', methods=['GET', 'POST'])
 def api_generate():
     if not is_logged_in():
@@ -1185,7 +1239,6 @@ def api_generate():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# 3. USE KEY - User uses their own key (only owner can use)
 @app.route('/api/key/use', methods=['POST'])
 def api_use_key():
     if not is_logged_in():
@@ -1204,10 +1257,9 @@ def api_use_key():
     if not key_record:
         return jsonify({'error': 'Key not found'}), 404
     
-    # Check if user can use this key
-    allowed, message = can_user_use_key(key_record, session['user_id'])
-    if not allowed:
-        return jsonify({'error': message}), 403
+    # Check if user is owner or admin
+    if key_record['user_id'] != session['user_id'] and not is_admin():
+        return jsonify({'error': 'You are not the owner of this key'}), 403
     
     if key_record['used'] == 1:
         return jsonify({'error': 'Key already used'}), 400
@@ -1223,7 +1275,6 @@ def api_use_key():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# 4. MY KEYS - Get current user's keys
 @app.route('/api/keys/my', methods=['GET'])
 def api_my_keys():
     if not is_logged_in():
@@ -1235,7 +1286,6 @@ def api_my_keys():
         'keys': keys
     })
 
-# 5. ALL KEYS - Admin only
 @app.route('/api/keys/all', methods=['GET'])
 def api_all_keys():
     if not is_logged_in():
@@ -1250,25 +1300,6 @@ def api_all_keys():
         'keys': keys
     })
 
-# 6. USED KEYS - Admin only
-@app.route('/api/keys/used', methods=['GET'])
-def api_used_keys():
-    if not is_logged_in():
-        return jsonify({'error': 'Unauthorized - Please login first'}), 401
-    
-    if not is_admin():
-        return jsonify({'error': 'Admin only'}), 403
-    
-    conn = get_db()
-    keys = conn.execute('SELECT key, device, expiry, used_by, used_at, owner_username FROM keys WHERE used = 1 ORDER BY id DESC LIMIT 100').fetchall()
-    conn.close()
-    
-    return jsonify({
-        'total': len(keys),
-        'used_keys': [dict(row) for row in keys]
-    })
-
-# 7. STATS - Admin only
 @app.route('/api/stats', methods=['GET'])
 def api_stats():
     if not is_logged_in():
@@ -1280,7 +1311,6 @@ def api_stats():
     stats = get_stats()
     return jsonify(stats)
 
-# 8. DELETE USER - Admin only
 @app.route('/api/user/delete/<int:user_id>', methods=['DELETE'])
 def api_delete_user(user_id):
     if not is_logged_in():
@@ -1298,7 +1328,6 @@ def api_delete_user(user_id):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# 9. ALL USERS - Admin only
 @app.route('/api/user/all', methods=['GET'])
 def api_all_users():
     if not is_logged_in():
@@ -1313,7 +1342,6 @@ def api_all_users():
         'users': users
     })
 
-# 10. CHECK KEY - Check key status (any logged in user)
 @app.route('/api/key/check/<key>', methods=['GET'])
 def api_check_key(key):
     if not is_logged_in():
@@ -1324,7 +1352,6 @@ def api_check_key(key):
     if not key_record:
         return jsonify({'exists': False, 'message': 'Key not found'}), 404
     
-    # Check if user is the owner
     is_owner = key_record['user_id'] == session['user_id']
     
     return jsonify({
@@ -1338,7 +1365,6 @@ def api_check_key(key):
         'is_owner': is_owner
     })
 
-# 11. PROFILE - Get current user info
 @app.route('/api/profile', methods=['GET'])
 def api_profile():
     if not is_logged_in():
@@ -1362,7 +1388,6 @@ def api_profile():
         'agreed_to_terms': bool(user['agreed_to_terms'])
     })
 
-# 12. KEY HISTORY - Get key usage history (owner or admin)
 @app.route('/api/key/history/<key>', methods=['GET'])
 def api_key_history(key):
     if not is_logged_in():
@@ -1372,7 +1397,6 @@ def api_key_history(key):
     if not key_record:
         return jsonify({'error': 'Key not found'}), 404
     
-    # Only owner or admin can view history
     if key_record['user_id'] != session['user_id'] and not is_admin():
         return jsonify({'error': 'Access denied - Not the owner'}), 403
     
