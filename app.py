@@ -6,14 +6,13 @@ import string
 import os
 import hashlib
 import sqlite3
-import re
 import base64
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 CORS(app)
 
-# ============ ENCRYPTION (KEY HARDCODED INSIDE) ============
+# ============ ENCRYPTION ============
 
 def enc(text):
     k = "U7m9x2L5p8R4v1Y3n6Q0t9E2w7A4d6"
@@ -55,7 +54,7 @@ def get_admin_passwords():
 
 # ============ DATABASE ============
 
-DATABASE_FILE = 'unique_mods.db'
+DATABASE_FILE = os.path.join('/tmp', 'unique_mods.db') if os.path.exists('/tmp') else 'unique_mods.db'
 
 def init_db():
     conn = sqlite3.connect(DATABASE_FILE)
@@ -90,33 +89,119 @@ def init_db():
     for email in get_admin_emails():
         for password in get_admin_passwords():
             try:
-                cursor.execute('INSERT OR IGNORE INTO users (username, password, email, is_admin, created_at) VALUES (?, ?, ?, ?, ?)',
-                            (email.split('@')[0], hashlib.md5(password.encode()).hexdigest(), email, 1, datetime.now().isoformat()))
+                cursor.execute('''
+                    INSERT OR IGNORE INTO users (username, password, email, is_admin, created_at) 
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (email.split('@')[0], hashlib.md5(password.encode()).hexdigest(), email, 1, datetime.now().isoformat()))
             except:
                 pass
     
     conn.commit()
     conn.close()
-    print("ok")
-
-init_db()
 
 def get_db():
     conn = sqlite3.connect(DATABASE_FILE)
     conn.row_factory = sqlite3.Row
     return conn
 
+init_db()
+
+# ============ HELPER FUNCTIONS ============
+
 def is_admin():
     return session.get('is_admin', False)
 
+def get_user_by_email(email):
+    conn = get_db()
+    user = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
+    conn.close()
+    return user
+
+def get_user_by_username(username):
+    conn = get_db()
+    user = conn.execute('SELECT * FROM users WHERE username = ?', (username,)).fetchone()
+    conn.close()
+    return user
+
+def get_user_by_id(user_id):
+    conn = get_db()
+    user = conn.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
+    conn.close()
+    return user
+
+def get_all_keys():
+    conn = get_db()
+    keys = conn.execute('SELECT * FROM keys ORDER BY id DESC LIMIT 100').fetchall()
+    conn.close()
+    return [dict(row) for row in keys]
+
+def get_key_by_key(key):
+    conn = get_db()
+    key_record = conn.execute('SELECT * FROM keys WHERE key = ?', (key,)).fetchone()
+    conn.close()
+    return key_record
+
+def get_stats():
+    conn = get_db()
+    total = conn.execute('SELECT COUNT(*) as total FROM keys').fetchone()
+    active = conn.execute('SELECT COUNT(*) as active FROM keys WHERE used = 0').fetchone()
+    used = conn.execute('SELECT COUNT(*) as used FROM keys WHERE used = 1').fetchone()
+    users = conn.execute('SELECT COUNT(*) as users FROM users').fetchone()
+    conn.close()
+    return {
+        'total': total['total'] if total else 0,
+        'active': active['active'] if active else 0,
+        'used': used['used'] if used else 0,
+        'users': users['users'] if users else 0
+    }
+
+def insert_user(username, email, password):
+    conn = get_db()
+    cursor = conn.execute('''
+        INSERT INTO users (username, email, password, is_admin, created_at)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (username, email, hashlib.md5(password.encode()).hexdigest(), 0, datetime.now().isoformat()))
+    user_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return user_id
+
+def insert_key(key, device, expiry, user_id):
+    conn = get_db()
+    conn.execute('''
+        INSERT INTO keys (key, device, expiry, created_at, user_id, used)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (key, device, expiry, datetime.now().isoformat(), user_id, 0))
+    conn.commit()
+    conn.close()
+
+def update_key_used(key, used_by):
+    conn = get_db()
+    conn.execute('''
+        UPDATE keys SET used = 1, used_by = ?, used_at = ? WHERE key = ?
+    ''', (used_by, datetime.now().isoformat(), key))
+    conn.commit()
+    conn.close()
+
+def delete_user_by_id(user_id):
+    conn = get_db()
+    conn.execute('DELETE FROM users WHERE id = ?', (user_id,))
+    conn.commit()
+    conn.close()
+
+def get_all_users():
+    conn = get_db()
+    users = conn.execute('SELECT id, username, email, is_admin, created_at FROM users').fetchall()
+    conn.close()
+    return [dict(row) for row in users]
+
 # ============ HTML ============
 
-HTML = {
-    'login': '''
+LOGIN_PAGE = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>UNIQUE MODS ONLINE</title>
+    <title>UNIQUE MODS ONLINE - Login</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         * { margin:0; padding:0; box-sizing:border-box; }
@@ -134,6 +219,8 @@ HTML = {
         .footer { text-align: center; margin-top: 20px; color: #666; font-size: 12px; }
         .footer a { color: #FFD700; text-decoration: none; }
         .made { text-align: center; color: #444; font-size: 11px; margin-top: 15px; }
+        .login-link { text-align: center; margin-top: 15px; color: #888; }
+        .login-link a { color: #FFD700; text-decoration: none; }
     </style>
 </head>
 <body>
@@ -154,6 +241,9 @@ HTML = {
         </div>
         <button type="submit" class="btn">LOGIN</button>
     </form>
+    <div class="login-link">
+        Don't have an account? <a href="/signup">Sign Up</a>
+    </div>
     <div class="footer">
         Made by: <a href="https://t.me/+FsOBvTfVSjRlNmFl">Farhan Modz</a>
     </div>
@@ -161,13 +251,81 @@ HTML = {
 </div>
 </body>
 </html>
-    ''',
-    
-    'dashboard': '''
+'''
+
+SIGNUP_PAGE = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>UNIQUE MODS ONLINE</title>
+    <title>UNIQUE MODS ONLINE - Sign Up</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { font-family: Arial, sans-serif; background: #0a0a0a; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+        .container { background: #1a1a2e; padding: 40px; border-radius: 16px; width: 400px; max-width: 90%; box-shadow: 0 0 40px rgba(255,215,0,0.1); }
+        .logo { text-align: center; font-size: 24px; font-weight: bold; color: #FFD700; margin-bottom: 8px; }
+        .sub { text-align: center; color: #888; font-size: 14px; margin-bottom: 30px; }
+        .input-group { margin-bottom: 20px; }
+        .input-group label { display: block; color: #ccc; font-size: 14px; margin-bottom: 6px; }
+        .input-group input { width: 100%; padding: 12px 16px; background: #0d0d1a; border: 1px solid #333; border-radius: 8px; color: white; font-size: 16px; }
+        .input-group input:focus { outline: none; border-color: #FFD700; }
+        .btn { width: 100%; padding: 14px; background: #FFD700; color: #0a0a0a; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; transition: 0.3s; }
+        .btn:hover { background: #e6c200; }
+        .error { color: #ff4444; text-align: center; margin-top: 12px; font-size: 14px; }
+        .success { color: #00ff88; text-align: center; margin-top: 12px; font-size: 14px; }
+        .footer { text-align: center; margin-top: 20px; color: #666; font-size: 12px; }
+        .footer a { color: #FFD700; text-decoration: none; }
+        .made { text-align: center; color: #444; font-size: 11px; margin-top: 15px; }
+        .login-link { text-align: center; margin-top: 15px; color: #888; }
+        .login-link a { color: #FFD700; text-decoration: none; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="logo">UNIQUE MODS ONLINE</div>
+    <div class="sub">Create Account</div>
+    {% if error %}
+    <div class="error">{{ error }}</div>
+    {% endif %}
+    {% if success %}
+    <div class="success">{{ success|safe }}</div>
+    {% endif %}
+    <form method="POST">
+        <div class="input-group">
+            <label>Username</label>
+            <input type="text" name="username" required placeholder="Choose username" minlength="3">
+        </div>
+        <div class="input-group">
+            <label>Email</label>
+            <input type="email" name="email" required placeholder="Enter email">
+        </div>
+        <div class="input-group">
+            <label>Password</label>
+            <input type="password" name="password" required placeholder="Min 6 characters" minlength="6">
+        </div>
+        <div class="input-group">
+            <label>Confirm Password</label>
+            <input type="password" name="confirm_password" required placeholder="Confirm password">
+        </div>
+        <button type="submit" class="btn">SIGN UP</button>
+    </form>
+    <div class="login-link">
+        Already have an account? <a href="/">Login</a>
+    </div>
+    <div class="footer">
+        Made by: <a href="https://t.me/+FsOBvTfVSjRlNmFl">Farhan Modz</a>
+    </div>
+    <div class="made">UNIQUE MODS &copy; 2026</div>
+</div>
+</body>
+</html>
+'''
+
+DASHBOARD_PAGE = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>UNIQUE MODS ONLINE - Dashboard</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         * { margin:0; padding:0; box-sizing:border-box; }
@@ -204,6 +362,9 @@ HTML = {
         .stat-box { background: #0d0d1a; padding: 12px; border-radius: 8px; text-align: center; }
         .stat-box .num { color: #FFD700; font-size: 22px; font-weight: bold; }
         .stat-box .label { color: #666; font-size: 12px; }
+        .btn-users { background: #6c5ce7; color: white; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer; }
+        .btn-users:hover { background: #5a4bd1; }
+        .header-buttons { display: flex; gap: 10px; flex-wrap: wrap; }
     </style>
 </head>
 <body>
@@ -213,8 +374,11 @@ HTML = {
             <div class="logo">UNIQUE MODS ONLINE</div>
             <div class="user">Welcome, <span>{{ username }}</span> <span class="admin-badge">ADMIN</span></div>
         </div>
-        <a href="/telegram" target="_blank"><button class="btn-telegram">Join Updates</button></a>
-        <a href="/logout"><button class="logout-btn">Logout</button></a>
+        <div class="header-buttons">
+            <a href="/users"><button class="btn-users">Users</button></a>
+            <a href="/telegram" target="_blank"><button class="btn-telegram">Join Updates</button></a>
+            <a href="/logout"><button class="logout-btn">Logout</button></a>
+        </div>
     </div>
 
     <div class="card">
@@ -279,8 +443,95 @@ HTML = {
 </div>
 </body>
 </html>
-    '''
+'''
+
+USERS_PAGE = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>UNIQUE MODS ONLINE - Users</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { font-family: Arial, sans-serif; background: #0a0a0a; padding: 20px; }
+        .container { max-width: 900px; margin: 0 auto; }
+        .header { background: #1a1a2e; padding: 20px; border-radius: 12px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; }
+        .logo { color: #FFD700; font-size: 20px; font-weight: bold; }
+        .back-btn { background: #FFD700; color: #0a0a0a; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        .back-btn:hover { background: #e6c200; }
+        .card { background: #1a1a2e; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+        .card h2 { color: #FFD700; font-size: 18px; margin-bottom: 12px; }
+        .user-item { background: #0d0d1a; padding: 12px 16px; border-radius: 6px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; border-left: 3px solid #6c5ce7; }
+        .user-item .username { color: #00ff88; font-weight: bold; }
+        .user-item .email { color: #888; font-size: 14px; }
+        .user-item .admin-badge { background: #FFD700; color: #0a0a0a; padding: 2px 10px; border-radius: 4px; font-size: 11px; font-weight: bold; }
+        .delete-btn { background: #ff4444; color: white; border: none; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+        .delete-btn:hover { background: #cc0000; }
+        .footer { text-align: center; margin-top: 30px; color: #444; font-size: 12px; }
+        .footer a { color: #FFD700; text-decoration: none; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <div>
+            <div class="logo">UNIQUE MODS ONLINE</div>
+            <div style="color: #888; font-size: 14px;">User Management</div>
+        </div>
+        <a href="/dashboard"><button class="back-btn">Back to Dashboard</button></a>
+    </div>
+
+    <div class="card">
+        <h2>All Users ({{ users|length }})</h2>
+        <div style="margin-top: 12px;">
+            {% for user in users %}
+            <div class="user-item">
+                <div>
+                    <span class="username">{{ user.username }}</span>
+                    <span class="email">{{ user.email }}</span>
+                    {% if user.is_admin == 1 %}
+                    <span class="admin-badge">ADMIN</span>
+                    {% endif %}
+                </div>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                    <span style="color: #666; font-size: 12px;">Joined: {{ user.created_at[:10] }}</span>
+                    {% if user.is_admin != 1 %}
+                    <button class="delete-btn" onclick="deleteUser('{{ user.id }}', '{{ user.username }}')">Delete</button>
+                    {% endif %}
+                </div>
+            </div>
+            {% else %}
+            <p style="color:#666;text-align:center;">No users</p>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div class="footer">
+        Made by: <a href="https://t.me/+FsOBvTfVSjRlNmFl">Farhan Modz</a>
+    </div>
+</div>
+
+<script>
+function deleteUser(userId, username) {
+    if(confirm('Delete user "' + username + '"?')) {
+        fetch('/api/user/delete/' + userId, {
+            method: 'DELETE'
+        })
+        .then(res => res.json())
+        .then(data => {
+            if(data.success) {
+                location.reload();
+            } else {
+                alert('Error: ' + data.error);
+            }
+        })
+        .catch(err => alert('Error: ' + err));
+    }
 }
+</script>
+</body>
+</html>
+'''
 
 # ============ ROUTES ============
 
@@ -291,11 +542,9 @@ def login():
         password = request.form.get('password')
         
         if not email or not password:
-            return render_template_string(HTML['login'], error="fill all fields")
+            return render_template_string(LOGIN_PAGE, error="Please fill all fields")
         
-        conn = get_db()
-        user = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
-        conn.close()
+        user = get_user_by_email(email)
         
         if user and user['password'] == hashlib.md5(password.encode()).hexdigest() and user['is_admin'] == 1:
             session['user_id'] = user['id']
@@ -304,30 +553,70 @@ def login():
             session['is_admin'] = True
             return redirect('/dashboard')
         else:
-            return render_template_string(HTML['login'], error="invalid")
+            return render_template_string(LOGIN_PAGE, error="Invalid credentials or not admin")
     
-    return render_template_string(HTML['login'], error=None)
+    return render_template_string(LOGIN_PAGE, error=None)
+
+@app.route('/signup', methods=['GET', 'POST'])
+def signup():
+    if request.method == 'POST':
+        username = request.form.get('username')
+        email = request.form.get('email')
+        password = request.form.get('password')
+        confirm_password = request.form.get('confirm_password')
+        
+        if not username or not email or not password:
+            return render_template_string(SIGNUP_PAGE, error="All fields are required")
+        
+        if len(username) < 3:
+            return render_template_string(SIGNUP_PAGE, error="Username must be at least 3 characters")
+        
+        if '@' not in email or '.' not in email:
+            return render_template_string(SIGNUP_PAGE, error="Invalid email address")
+        
+        if len(password) < 6:
+            return render_template_string(SIGNUP_PAGE, error="Password must be at least 6 characters")
+        
+        if password != confirm_password:
+            return render_template_string(SIGNUP_PAGE, error="Passwords do not match")
+        
+        existing_user = get_user_by_email(email)
+        if existing_user:
+            return render_template_string(SIGNUP_PAGE, error="Email already registered")
+        
+        existing_username = get_user_by_username(username)
+        if existing_username:
+            return render_template_string(SIGNUP_PAGE, error="Username already taken")
+        
+        try:
+            insert_user(username, email, password)
+            return render_template_string(SIGNUP_PAGE, success='Account created successfully! <a href="/" style="color:#FFD700;">Login here</a>')
+        except Exception as e:
+            return render_template_string(SIGNUP_PAGE, error="Error: " + str(e))
+    
+    return render_template_string(SIGNUP_PAGE, error=None, success=None)
 
 @app.route('/dashboard')
 def dashboard():
     if 'user_id' not in session or not is_admin():
         return redirect('/')
     
-    conn = get_db()
-    keys = conn.execute('SELECT * FROM keys ORDER BY id DESC LIMIT 100').fetchall()
-    stats = conn.execute('SELECT COUNT(*) as total FROM keys').fetchone()
-    active = conn.execute('SELECT COUNT(*) as active FROM keys WHERE used = 0').fetchone()
-    used = conn.execute('SELECT COUNT(*) as used FROM keys WHERE used = 1').fetchone()
-    users = conn.execute('SELECT COUNT(*) as users FROM users').fetchone()
-    conn.close()
+    keys = get_all_keys()
+    stats = get_stats()
     
-    keys_list = [dict(row) for row in keys]
-    
-    return render_template_string(HTML['dashboard'],
+    return render_template_string(DASHBOARD_PAGE,
         username=session.get('username', 'Admin'),
-        keys=keys_list,
-        stats={'total': stats['total'], 'active': active['active'], 'used': used['used'], 'users': users['users']}
+        keys=keys,
+        stats=stats
     )
+
+@app.route('/users')
+def list_users():
+    if 'user_id' not in session or not is_admin():
+        return redirect('/')
+    
+    users = get_all_users()
+    return render_template_string(USERS_PAGE, users=users)
 
 @app.route('/logout')
 def logout():
@@ -343,26 +632,26 @@ def telegram():
 @app.route('/api/connect')
 def api_connect():
     if not is_admin():
-        return jsonify({'error': 'fuck you'}), 401
+        return jsonify({'error': 'Unauthorized'}), 401
     return jsonify({'status': 'online', 'made_by': 'Farhan Modz'})
 
 @app.route('/api/key/generate')
 def api_generate():
     if not is_admin():
-        return jsonify({'error': 'fuck you'}), 401
+        return jsonify({'error': 'Unauthorized'}), 401
     
     device = request.args.get('device')
     expiry = request.args.get('expire')
     custom_key = request.args.get('custom_key')
     
     if not device or not expiry:
-        return jsonify({'error': 'missing params'}), 400
+        return jsonify({'error': 'Missing parameters'}), 400
     
     chars = string.ascii_letters + string.digits
     if custom_key:
         key = ''.join(c for c in custom_key if c.isalnum())
         if len(key) < 4:
-            return jsonify({'error': 'key too short'}), 400
+            return jsonify({'error': 'Key too short (min 4 chars)'}), 400
     else:
         key = ''.join(secrets.choice(chars) for _ in range(32))
     
@@ -373,63 +662,54 @@ def api_generate():
         expiry_date = datetime.now() + timedelta(days=30)
         expiry = expiry_date.strftime('%d-%B-%Y')
     
-    conn = get_db()
-    
-    existing = conn.execute('SELECT * FROM keys WHERE key = ?', (key,)).fetchone()
+    existing = get_key_by_key(key)
     if existing:
         if custom_key:
-            conn.close()
-            return jsonify({'error': 'key exists'}), 400
+            return jsonify({'error': 'Key already exists'}), 400
         key = ''.join(secrets.choice(chars) for _ in range(32))
     
-    conn.execute('INSERT INTO keys (key, device, expiry, created_at, user_id, used) VALUES (?, ?, ?, ?, ?, ?)',
-                (key, device, expiry, datetime.now().isoformat(), session['user_id'], 0))
-    conn.commit()
-    conn.close()
+    try:
+        insert_key(key, device, expiry, session['user_id'])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
     
     return jsonify({'key': key})
 
 @app.route('/api/key/use/<key>', methods=['POST'])
 def api_use_key(key):
     if not is_admin():
-        return jsonify({'error': 'fuck you'}), 401
+        return jsonify({'error': 'Unauthorized'}), 401
     
     data = request.get_json()
     device = data.get('device') if data else request.args.get('device')
     
-    conn = get_db()
-    key_record = conn.execute('SELECT * FROM keys WHERE key = ?', (key,)).fetchone()
+    key_record = get_key_by_key(key)
     
     if not key_record:
-        conn.close()
-        return jsonify({'error': 'not found'}), 404
+        return jsonify({'error': 'Key not found'}), 404
     
     if key_record['used'] == 1:
-        conn.close()
-        return jsonify({'error': 'already used'}), 400
+        return jsonify({'error': 'Key already used'}), 400
     
-    conn.execute('UPDATE keys SET used = 1, used_by = ?, used_at = ? WHERE key = ?',
-                (device or 'unknown', datetime.now().isoformat(), key))
-    conn.commit()
-    conn.close()
+    try:
+        update_key_used(key, device or 'unknown')
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
     
     return jsonify({'success': True})
 
 @app.route('/api/keys/lists')
 def api_keys_lists():
     if not is_admin():
-        return jsonify({'error': 'fuck you'}), 401
+        return jsonify({'error': 'Unauthorized'}), 401
     
-    conn = get_db()
-    keys = conn.execute('SELECT key, device, expiry, used FROM keys ORDER BY id DESC LIMIT 100').fetchall()
-    conn.close()
-    
-    return jsonify({'keys': [dict(row) for row in keys]})
+    keys = get_all_keys()
+    return jsonify({'keys': keys})
 
 @app.route('/api/key/use/lists')
 def api_used_keys():
     if not is_admin():
-        return jsonify({'error': 'fuck you'}), 401
+        return jsonify({'error': 'Unauthorized'}), 401
     
     conn = get_db()
     keys = conn.execute('SELECT key, device, expiry, used_by, used_at FROM keys WHERE used = 1 ORDER BY id DESC LIMIT 100').fetchall()
@@ -440,21 +720,37 @@ def api_used_keys():
 @app.route('/api/stats')
 def api_stats():
     if not is_admin():
-        return jsonify({'error': 'fuck you'}), 401
+        return jsonify({'error': 'Unauthorized'}), 401
     
-    conn = get_db()
-    total = conn.execute('SELECT COUNT(*) as total FROM keys').fetchone()
-    active = conn.execute('SELECT COUNT(*) as active FROM keys WHERE used = 0').fetchone()
-    used = conn.execute('SELECT COUNT(*) as used FROM keys WHERE used = 1').fetchone()
-    users = conn.execute('SELECT COUNT(*) as users FROM users').fetchone()
-    conn.close()
-    
+    stats = get_stats()
     return jsonify({
-        'total_keys': total['total'],
-        'active_keys': active['active'],
-        'used_keys': used['used'],
-        'total_users': users['users']
+        'total_keys': stats['total'],
+        'active_keys': stats['active'],
+        'used_keys': stats['used'],
+        'total_users': stats['users']
     })
+
+@app.route('/api/user/delete/<int:user_id>', methods=['DELETE'])
+def delete_user(user_id):
+    if not is_admin():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    if user_id == session.get('user_id'):
+        return jsonify({'error': 'Cannot delete yourself'}), 400
+    
+    try:
+        delete_user_by_id(user_id)
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/user/all')
+def api_all_users():
+    if not is_admin():
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    users = get_all_users()
+    return jsonify({'users': users})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)
