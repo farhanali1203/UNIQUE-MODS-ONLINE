@@ -7,50 +7,11 @@ import os
 import hashlib
 import sqlite3
 import base64
+import re
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 CORS(app)
-
-# ============ ENCRYPTION ============
-
-def enc(text):
-    k = "U7m9x2L5p8R4v1Y3n6Q0t9E2w7A4d6"
-    result = ""
-    for i, c in enumerate(text):
-        result += chr(ord(c) ^ ord(k[i % len(k)]))
-    return base64.b64encode(result.encode()).decode()
-
-def dec(text):
-    k = "U7m9x2L5p8R4v1Y3n6Q0t9E2w7A4d6"
-    try:
-        decoded = base64.b64decode(text.encode()).decode()
-        result = ""
-        for i, c in enumerate(decoded):
-            result += chr(ord(c) ^ ord(k[i % len(k)]))
-        return result
-    except:
-        return ""
-
-# ============ ENCRYPTED ADMIN DATA ============
-ENC_EMAILS = [
-    "mcix4u7k9t2b5v8q1w3p6s0a9d4f7h2j",
-    "5l8o2r6u9y1e4t7a0c3f6i9l2m5p8s1",
-    "4v7b0e3h6k9n2q5t8w1z4c7f0j3m6p9"
-]
-ENC_PASSWORDS = [
-    "g4j7m0p3s6v9y2b5e8h1k4n7q0t3w6z9",
-    "h5k8n1p4s7v0y3b6e9i2l5o8r1u4x7a0",
-    "j6l9o2r5u8x1z4c7f0k3n6p9s2v5y8b1",
-    "k7m0p3s6v9y2b5e8h1l4o7r0u3w6z9c2",
-    "l8n1p4s7v0y3b6e9i2m5p8r1u4x7a0d3"
-]
-
-def get_admin_emails():
-    return [dec(e) for e in ENC_EMAILS]
-
-def get_admin_passwords():
-    return [dec(p) for p in ENC_PASSWORDS]
 
 # ============ DATABASE ============
 
@@ -67,6 +28,7 @@ def init_db():
             password TEXT NOT NULL,
             email TEXT UNIQUE NOT NULL,
             is_admin INTEGER DEFAULT 0,
+            agreed_to_terms INTEGER DEFAULT 0,
             created_at TEXT NOT NULL
         )
     ''')
@@ -82,22 +44,34 @@ def init_db():
             used INTEGER DEFAULT 0,
             used_by TEXT,
             used_at TEXT,
+            owner_username TEXT NOT NULL,
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
     ''')
     
-    for email in get_admin_emails():
-        for password in get_admin_passwords():
-            try:
-                cursor.execute('''
-                    INSERT OR IGNORE INTO users (username, password, email, is_admin, created_at) 
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (email.split('@')[0], hashlib.md5(password.encode()).hexdigest(), email, 1, datetime.now().isoformat()))
-            except:
-                pass
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS key_usage_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            key TEXT NOT NULL,
+            used_by_user_id INTEGER NOT NULL,
+            used_by_username TEXT NOT NULL,
+            used_at TEXT NOT NULL,
+            FOREIGN KEY (used_by_user_id) REFERENCES users(id)
+        )
+    ''')
+    
+    # Default admin account
+    try:
+        cursor.execute('''
+            INSERT OR IGNORE INTO users (username, password, email, is_admin, agreed_to_terms, created_at) 
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', ('admin', hashlib.md5('admin123'.encode()).hexdigest(), 'admin@unique.com', 1, 1, datetime.now().isoformat()))
+    except:
+        pass
     
     conn.commit()
     conn.close()
+    print("Database initialized!")
 
 def get_db():
     conn = sqlite3.connect(DATABASE_FILE)
@@ -110,6 +84,9 @@ init_db()
 
 def is_admin():
     return session.get('is_admin', False)
+
+def is_logged_in():
+    return session.get('user_id') is not None
 
 def get_user_by_email(email):
     conn = get_db()
@@ -135,6 +112,12 @@ def get_all_keys():
     conn.close()
     return [dict(row) for row in keys]
 
+def get_keys_by_user(user_id):
+    conn = get_db()
+    keys = conn.execute('SELECT * FROM keys WHERE user_id = ? ORDER BY id DESC', (user_id,)).fetchall()
+    conn.close()
+    return [dict(row) for row in keys]
+
 def get_key_by_key(key):
     conn = get_db()
     key_record = conn.execute('SELECT * FROM keys WHERE key = ?', (key,)).fetchone()
@@ -155,31 +138,39 @@ def get_stats():
         'users': users['users'] if users else 0
     }
 
-def insert_user(username, email, password):
+def insert_user(username, email, password, agreed_to_terms):
     conn = get_db()
     cursor = conn.execute('''
-        INSERT INTO users (username, email, password, is_admin, created_at)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (username, email, hashlib.md5(password.encode()).hexdigest(), 0, datetime.now().isoformat()))
+        INSERT INTO users (username, email, password, is_admin, agreed_to_terms, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (username, email, hashlib.md5(password.encode()).hexdigest(), 0, 1 if agreed_to_terms else 0, datetime.now().isoformat()))
     user_id = cursor.lastrowid
     conn.commit()
     conn.close()
     return user_id
 
-def insert_key(key, device, expiry, user_id):
+def insert_key(key, device, expiry, user_id, username):
     conn = get_db()
     conn.execute('''
-        INSERT INTO keys (key, device, expiry, created_at, user_id, used)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (key, device, expiry, datetime.now().isoformat(), user_id, 0))
+        INSERT INTO keys (key, device, expiry, created_at, user_id, used, owner_username)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (key, device, expiry, datetime.now().isoformat(), user_id, 0, username))
     conn.commit()
     conn.close()
 
-def update_key_used(key, used_by):
+def update_key_used(key, used_by_user_id, used_by_username):
     conn = get_db()
+    # Update key
     conn.execute('''
         UPDATE keys SET used = 1, used_by = ?, used_at = ? WHERE key = ?
-    ''', (used_by, datetime.now().isoformat(), key))
+    ''', (used_by_username, datetime.now().isoformat(), key))
+    
+    # Log usage history
+    conn.execute('''
+        INSERT INTO key_usage_history (key, used_by_user_id, used_by_username, used_at)
+        VALUES (?, ?, ?, ?)
+    ''', (key, used_by_user_id, used_by_username, datetime.now().isoformat()))
+    
     conn.commit()
     conn.close()
 
@@ -191,9 +182,30 @@ def delete_user_by_id(user_id):
 
 def get_all_users():
     conn = get_db()
-    users = conn.execute('SELECT id, username, email, is_admin, created_at FROM users').fetchall()
+    users = conn.execute('SELECT id, username, email, is_admin, agreed_to_terms, created_at FROM users').fetchall()
     conn.close()
     return [dict(row) for row in users]
+
+def get_key_usage_history(key):
+    conn = get_db()
+    history = conn.execute('SELECT * FROM key_usage_history WHERE key = ? ORDER BY used_at DESC', (key,)).fetchall()
+    conn.close()
+    return [dict(row) for row in history]
+
+def can_user_use_key(key_record, user_id):
+    """Check if user is allowed to use this key"""
+    if not key_record:
+        return False, "Key not found"
+    
+    # Admin can use any key
+    if is_admin():
+        return True, "Admin access"
+    
+    # Only the owner can use their own key
+    if key_record['user_id'] == user_id:
+        return True, "Owner access"
+    
+    return False, "You are not the owner of this key"
 
 # ============ HTML ============
 
@@ -206,7 +218,7 @@ LOGIN_PAGE = '''
     <style>
         * { margin:0; padding:0; box-sizing:border-box; }
         body { font-family: Arial, sans-serif; background: #0a0a0a; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-        .container { background: #1a1a2e; padding: 40px; border-radius: 16px; width: 400px; max-width: 90%; box-shadow: 0 0 40px rgba(255,215,0,0.1); }
+        .container { background: #1a1a2e; padding: 40px; border-radius: 16px; width: 420px; max-width: 92%; box-shadow: 0 0 40px rgba(255,215,0,0.1); }
         .logo { text-align: center; font-size: 24px; font-weight: bold; color: #FFD700; margin-bottom: 8px; }
         .sub { text-align: center; color: #888; font-size: 14px; margin-bottom: 30px; }
         .input-group { margin-bottom: 20px; }
@@ -221,107 +233,241 @@ LOGIN_PAGE = '''
         .made { text-align: center; color: #444; font-size: 11px; margin-top: 15px; }
         .login-link { text-align: center; margin-top: 15px; color: #888; }
         .login-link a { color: #FFD700; text-decoration: none; }
+        .tabs { display: flex; margin-bottom: 20px; border-bottom: 1px solid #333; }
+        .tab { flex: 1; padding: 10px; text-align: center; color: #888; cursor: pointer; border-bottom: 3px solid transparent; transition: 0.3s; }
+        .tab.active { color: #FFD700; border-bottom-color: #FFD700; }
+        .tab:hover { color: #FFD700; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .checkbox-group { display: flex; align-items: center; gap: 10px; margin: 15px 0; }
+        .checkbox-group input[type="checkbox"] { width: 18px; height: 18px; accent-color: #FFD700; cursor: pointer; }
+        .checkbox-group label { color: #aaa; font-size: 13px; cursor: pointer; }
+        .checkbox-group a { color: #FFD700; text-decoration: none; }
+        .checkbox-group a:hover { text-decoration: underline; }
     </style>
 </head>
 <body>
 <div class="container">
     <div class="logo">UNIQUE MODS ONLINE</div>
-    <div class="sub">Admin Login</div>
-    {% if error %}
-    <div class="error">{{ error }}</div>
-    {% endif %}
-    <form method="POST">
-        <div class="input-group">
-            <label>Email</label>
-            <input type="email" name="email" required placeholder="Enter email">
-        </div>
-        <div class="input-group">
-            <label>Password</label>
-            <input type="password" name="password" required placeholder="Enter password">
-        </div>
-        <button type="submit" class="btn">LOGIN</button>
-    </form>
-    <div class="login-link">
-        Don't have an account? <a href="/signup">Sign Up</a>
+    <div class="sub">Welcome</div>
+    
+    <div class="tabs">
+        <div class="tab active" onclick="showTab('login')">Login</div>
+        <div class="tab" onclick="showTab('signup')">Sign Up</div>
     </div>
+    
+    <div id="login-tab" class="tab-content active">
+        {% if error %}
+        <div class="error">{{ error }}</div>
+        {% endif %}
+        <form method="POST" action="/">
+            <div class="input-group">
+                <label>Email</label>
+                <input type="email" name="email" required placeholder="Enter email">
+            </div>
+            <div class="input-group">
+                <label>Password</label>
+                <input type="password" name="password" required placeholder="Enter password">
+            </div>
+            <button type="submit" class="btn">LOGIN</button>
+        </form>
+    </div>
+    
+    <div id="signup-tab" class="tab-content">
+        {% if signup_error %}
+        <div class="error">{{ signup_error }}</div>
+        {% endif %}
+        {% if signup_success %}
+        <div class="success" style="color:#00ff88;text-align:center;margin-top:12px;font-size:14px;">{{ signup_success|safe }}</div>
+        {% endif %}
+        <form method="POST" action="/signup">
+            <div class="input-group">
+                <label>Username</label>
+                <input type="text" name="username" required placeholder="Choose username" minlength="3">
+            </div>
+            <div class="input-group">
+                <label>Email</label>
+                <input type="email" name="email" required placeholder="Enter email">
+            </div>
+            <div class="input-group">
+                <label>Password</label>
+                <input type="password" name="password" required placeholder="Min 6 characters" minlength="6">
+            </div>
+            <div class="input-group">
+                <label>Confirm Password</label>
+                <input type="password" name="confirm_password" required placeholder="Confirm password">
+            </div>
+            
+            <div class="checkbox-group">
+                <input type="checkbox" name="agree_terms" id="agree_terms" required>
+                <label for="agree_terms">I agree to the <a href="/privacy" target="_blank">Privacy Policy</a> and <a href="/terms" target="_blank">Terms of Service</a></label>
+            </div>
+            
+            <button type="submit" class="btn">SIGN UP</button>
+        </form>
+    </div>
+    
     <div class="footer">
         Made by: <a href="https://t.me/+FsOBvTfVSjRlNmFl">Farhan Modz</a>
     </div>
     <div class="made">UNIQUE MODS &copy; 2026</div>
 </div>
+
+<script>
+function showTab(tab) {
+    document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+    document.getElementById(tab + '-tab').classList.add('active');
+    document.querySelector('.tab[onclick="showTab(\'' + tab + '\')"]').classList.add('active');
+}
+</script>
 </body>
 </html>
 '''
 
-SIGNUP_PAGE = '''
+PRIVACY_PAGE = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>UNIQUE MODS ONLINE - Sign Up</title>
+    <title>UNIQUE MODS ONLINE - Privacy Policy</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         * { margin:0; padding:0; box-sizing:border-box; }
-        body { font-family: Arial, sans-serif; background: #0a0a0a; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-        .container { background: #1a1a2e; padding: 40px; border-radius: 16px; width: 400px; max-width: 90%; box-shadow: 0 0 40px rgba(255,215,0,0.1); }
-        .logo { text-align: center; font-size: 24px; font-weight: bold; color: #FFD700; margin-bottom: 8px; }
-        .sub { text-align: center; color: #888; font-size: 14px; margin-bottom: 30px; }
-        .input-group { margin-bottom: 20px; }
-        .input-group label { display: block; color: #ccc; font-size: 14px; margin-bottom: 6px; }
-        .input-group input { width: 100%; padding: 12px 16px; background: #0d0d1a; border: 1px solid #333; border-radius: 8px; color: white; font-size: 16px; }
-        .input-group input:focus { outline: none; border-color: #FFD700; }
-        .btn { width: 100%; padding: 14px; background: #FFD700; color: #0a0a0a; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; transition: 0.3s; }
-        .btn:hover { background: #e6c200; }
-        .error { color: #ff4444; text-align: center; margin-top: 12px; font-size: 14px; }
-        .success { color: #00ff88; text-align: center; margin-top: 12px; font-size: 14px; }
-        .footer { text-align: center; margin-top: 20px; color: #666; font-size: 12px; }
+        body { font-family: Arial, sans-serif; background: #0a0a0a; padding: 20px; }
+        .container { max-width: 800px; margin: 0 auto; background: #1a1a2e; padding: 40px; border-radius: 16px; box-shadow: 0 0 40px rgba(255,215,0,0.1); }
+        .logo { text-align: center; font-size: 24px; font-weight: bold; color: #FFD700; margin-bottom: 20px; }
+        h2 { color: #FFD700; margin: 20px 0 10px 0; }
+        p, li { color: #aaa; line-height: 1.8; font-size: 14px; }
+        ul { padding-left: 20px; }
+        .back-btn { display: inline-block; padding: 10px 24px; background: #FFD700; color: #0a0a0a; text-decoration: none; border-radius: 8px; font-weight: bold; margin-top: 20px; }
+        .back-btn:hover { background: #e6c200; }
+        .footer { text-align: center; margin-top: 30px; color: #444; font-size: 12px; }
         .footer a { color: #FFD700; text-decoration: none; }
-        .made { text-align: center; color: #444; font-size: 11px; margin-top: 15px; }
-        .login-link { text-align: center; margin-top: 15px; color: #888; }
-        .login-link a { color: #FFD700; text-decoration: none; }
     </style>
 </head>
 <body>
 <div class="container">
     <div class="logo">UNIQUE MODS ONLINE</div>
-    <div class="sub">Create Account</div>
-    {% if error %}
-    <div class="error">{{ error }}</div>
-    {% endif %}
-    {% if success %}
-    <div class="success">{{ success|safe }}</div>
-    {% endif %}
-    <form method="POST">
-        <div class="input-group">
-            <label>Username</label>
-            <input type="text" name="username" required placeholder="Choose username" minlength="3">
-        </div>
-        <div class="input-group">
-            <label>Email</label>
-            <input type="email" name="email" required placeholder="Enter email">
-        </div>
-        <div class="input-group">
-            <label>Password</label>
-            <input type="password" name="password" required placeholder="Min 6 characters" minlength="6">
-        </div>
-        <div class="input-group">
-            <label>Confirm Password</label>
-            <input type="password" name="confirm_password" required placeholder="Confirm password">
-        </div>
-        <button type="submit" class="btn">SIGN UP</button>
-    </form>
-    <div class="login-link">
-        Already have an account? <a href="/">Login</a>
-    </div>
+    <h1 style="color:#FFD700;font-size:28px;margin-bottom:10px;">Privacy Policy</h1>
+    <p>Last updated: August 19, 2026</p>
+    
+    <h2>1. Information We Collect</h2>
+    <ul>
+        <li><strong>Account Information:</strong> Username, email address, and hashed password</li>
+        <li><strong>Usage Data:</strong> Key usage history and device information</li>
+        <li><strong>Cookies:</strong> Session cookies for authentication</li>
+    </ul>
+    
+    <h2>2. How We Use Your Information</h2>
+    <ul>
+        <li>To provide and maintain our service</li>
+        <li>To authenticate your identity</li>
+        <li>To track key usage and prevent abuse</li>
+        <li>To communicate with you about updates</li>
+    </ul>
+    
+    <h2>3. Data Security</h2>
+    <ul>
+        <li>Passwords are stored using MD5 hashing</li>
+        <li>All data is stored in encrypted SQLite database</li>
+        <li>We implement session-based authentication</li>
+    </ul>
+    
+    <h2>4. Data Sharing</h2>
+    <ul>
+        <li>We do not sell or share your personal data</li>
+        <li>Key usage history is logged for security</li>
+    </ul>
+    
+    <h2>5. Your Rights</h2>
+    <ul>
+        <li>You can delete your account at any time</li>
+        <li>You can request data export</li>
+    </ul>
+    
+    <h2>6. Contact</h2>
+    <p>For privacy concerns, contact us via <a href="https://t.me/+FsOBvTfVSjRlNmFl" style="color:#FFD700;">Telegram</a></p>
+    
+    <a href="/" class="back-btn">Back to Login</a>
+    
     <div class="footer">
         Made by: <a href="https://t.me/+FsOBvTfVSjRlNmFl">Farhan Modz</a>
     </div>
-    <div class="made">UNIQUE MODS &copy; 2026</div>
 </div>
 </body>
 </html>
 '''
 
-DASHBOARD_PAGE = '''
+TERMS_PAGE = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>UNIQUE MODS ONLINE - Terms of Service</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { font-family: Arial, sans-serif; background: #0a0a0a; padding: 20px; }
+        .container { max-width: 800px; margin: 0 auto; background: #1a1a2e; padding: 40px; border-radius: 16px; box-shadow: 0 0 40px rgba(255,215,0,0.1); }
+        .logo { text-align: center; font-size: 24px; font-weight: bold; color: #FFD700; margin-bottom: 20px; }
+        h2 { color: #FFD700; margin: 20px 0 10px 0; }
+        p, li { color: #aaa; line-height: 1.8; font-size: 14px; }
+        ul { padding-left: 20px; }
+        .back-btn { display: inline-block; padding: 10px 24px; background: #FFD700; color: #0a0a0a; text-decoration: none; border-radius: 8px; font-weight: bold; margin-top: 20px; }
+        .back-btn:hover { background: #e6c200; }
+        .footer { text-align: center; margin-top: 30px; color: #444; font-size: 12px; }
+        .footer a { color: #FFD700; text-decoration: none; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="logo">UNIQUE MODS ONLINE</div>
+    <h1 style="color:#FFD700;font-size:28px;margin-bottom:10px;">Terms of Service</h1>
+    <p>Last updated: August 19, 2026</p>
+    
+    <h2>1. Acceptance of Terms</h2>
+    <p>By using UNIQUE MODS ONLINE, you agree to these terms.</p>
+    
+    <h2>2. User Accounts</h2>
+    <ul>
+        <li>You must provide accurate information</li>
+        <li>You are responsible for your account security</li>
+        <li>One account per user</li>
+    </ul>
+    
+    <h2>3. Key Usage</h2>
+    <ul>
+        <li>Keys are for personal use only</li>
+        <li>Sharing keys is prohibited</li>
+        <li>Keys have expiry dates</li>
+    </ul>
+    
+    <h2>4. Prohibited Activities</h2>
+    <ul>
+        <li>Unauthorized access to system</li>
+        <li>Abusing the key system</li>
+        <li>Creating multiple accounts</li>
+    </ul>
+    
+    <h2>5. Account Termination</h2>
+    <ul>
+        <li>We reserve the right to terminate accounts</li>
+        <li>Violation of terms results in suspension</li>
+    </ul>
+    
+    <h2>6. Changes to Terms</h2>
+    <p>We may update terms with notice to users.</p>
+    
+    <a href="/" class="back-btn">Back to Login</a>
+    
+    <div class="footer">
+        Made by: <a href="https://t.me/+FsOBvTfVSjRlNmFl">Farhan Modz</a>
+    </div>
+</div>
+</body>
+</html>
+'''
+
+USER_DASHBOARD = '''
 <!DOCTYPE html>
 <html>
 <head>
@@ -331,6 +477,247 @@ DASHBOARD_PAGE = '''
         * { margin:0; padding:0; box-sizing:border-box; }
         body { font-family: Arial, sans-serif; background: #0a0a0a; padding: 20px; }
         .container { max-width: 900px; margin: 0 auto; }
+        .header { background: #1a1a2e; padding: 20px; border-radius: 12px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; }
+        .logo { color: #FFD700; font-size: 20px; font-weight: bold; }
+        .user { color: #888; }
+        .user span { color: #FFD700; }
+        .logout-btn { background: #ff4444; color: white; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer; }
+        .logout-btn:hover { background: #cc0000; }
+        .card { background: #1a1a2e; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+        .card h2 { color: #FFD700; font-size: 18px; margin-bottom: 12px; }
+        .card p { color: #aaa; font-size: 14px; }
+        .footer { text-align: center; margin-top: 30px; color: #444; font-size: 12px; }
+        .footer a { color: #FFD700; text-decoration: none; }
+        .made { text-align: center; color: #333; font-size: 11px; margin-top: 10px; }
+        .btn-telegram { background: #0088cc; color: white; border: none; padding: 10px 24px; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        .btn-telegram:hover { background: #006699; }
+        .join-btn { display: inline-block; background: #0088cc; color: white; padding: 10px 24px; border-radius: 6px; text-decoration: none; font-weight: bold; margin: 10px 0; }
+        .join-btn:hover { background: #006699; }
+        .tabs { display: flex; margin-bottom: 20px; border-bottom: 1px solid #333; }
+        .tab { padding: 10px 20px; color: #888; cursor: pointer; border-bottom: 3px solid transparent; transition: 0.3s; }
+        .tab.active { color: #FFD700; border-bottom-color: #FFD700; }
+        .tab:hover { color: #FFD700; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .input-group { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+        .input-group input { flex: 1; min-width: 150px; padding: 10px 14px; background: #0d0d1a; border: 1px solid #333; border-radius: 6px; color: white; }
+        .input-group button { background: #FFD700; color: #0a0a0a; border: none; padding: 10px 24px; border-radius: 6px; font-weight: bold; cursor: pointer; }
+        .input-group button:hover { background: #e6c200; }
+        .key-list { margin-top: 12px; }
+        .key-item { background: #0d0d1a; padding: 12px 16px; border-radius: 6px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; border-left: 3px solid #FFD700; }
+        .key-item .key { color: #00ff88; font-family: monospace; font-size: 13px; word-break: break-all; }
+        .key-item .info { color: #888; font-size: 12px; }
+        .key-item .status-used { color: #ff4444; }
+        .key-item .status-active { color: #00ff88; }
+        .success { color: #00ff88; text-align: center; margin-top: 12px; font-size: 14px; }
+        .error { color: #ff4444; text-align: center; margin-top: 12px; font-size: 14px; }
+        .owner-badge { background: #6c5ce7; color: white; padding: 2px 8px; border-radius: 4px; font-size: 10px; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <div>
+            <div class="logo">UNIQUE MODS ONLINE</div>
+            <div class="user">Welcome, <span>{{ username }}</span></div>
+        </div>
+        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+            <a href="/telegram" target="_blank"><button class="btn-telegram">Join Updates</button></a>
+            <a href="/logout"><button class="logout-btn">Logout</button></a>
+        </div>
+    </div>
+
+    <div class="tabs">
+        <div class="tab active" onclick="showTab('generate')">Generate Key</div>
+        <div class="tab" onclick="showTab('mykeys')">My Keys</div>
+        <div class="tab" onclick="showTab('use')">Use Key</div>
+        <div class="tab" onclick="showTab('profile')">Profile</div>
+    </div>
+
+    <!-- Generate Key Tab -->
+    <div id="generate-tab" class="tab-content active">
+        <div class="card">
+            <h2>Generate Your Own Key</h2>
+            <p>Generate a unique key for your device. You can only use keys you generate.</p>
+            <form id="generateForm" onsubmit="generateKey(event)">
+                <div class="input-group">
+                    <input type="text" id="device" placeholder="Device ID" required>
+                    <input type="text" id="expire" placeholder="Expiry (e.g. 18-August-2026)" required>
+                    <button type="submit">Generate Key</button>
+                </div>
+            </form>
+            <div id="generateResult"></div>
+        </div>
+    </div>
+
+    <!-- My Keys Tab -->
+    <div id="mykeys-tab" class="tab-content">
+        <div class="card">
+            <h2>My Generated Keys</h2>
+            <div id="myKeysList">
+                <p style="color:#666;">Loading your keys...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Use Key Tab -->
+    <div id="use-tab" class="tab-content">
+        <div class="card">
+            <h2>Use Your Key</h2>
+            <p>You can only use keys that YOU generated. Each key can only be used once.</p>
+            <div class="input-group">
+                <input type="text" id="useKeyInput" placeholder="Enter your key to use">
+                <button onclick="useKey()">Use Key</button>
+            </div>
+            <div id="useResult"></div>
+        </div>
+    </div>
+
+    <!-- Profile Tab -->
+    <div id="profile-tab" class="tab-content">
+        <div class="card">
+            <h2>My Profile</h2>
+            <p><strong>Username:</strong> {{ username }}</p>
+            <p><strong>Email:</strong> {{ email }}</p>
+            <p><strong>Account Created:</strong> {{ created_at[:10] }}</p>
+            <p><strong>Keys Generated:</strong> <span id="keyCount">0</span></p>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Join For Updates</h2>
+        <a href="https://t.me/+FsOBvTfVSjRlNmFl" target="_blank" class="join-btn">Join Telegram Channel</a>
+    </div>
+
+    <div class="footer">
+        Made by: <a href="https://t.me/+FsOBvTfVSjRlNmFl">Farhan Modz</a>
+    </div>
+    <div class="made">UNIQUE MODS ONLINE &copy; 2026</div>
+</div>
+
+<script>
+function showTab(tab) {
+    document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+    document.getElementById(tab + '-tab').classList.add('active');
+    document.querySelector('.tab[onclick="showTab(\'' + tab + '\')"]').classList.add('active');
+    
+    if (tab === 'mykeys') {
+        loadMyKeys();
+    }
+}
+
+function generateKey(e) {
+    e.preventDefault();
+    const device = document.getElementById('device').value;
+    const expire = document.getElementById('expire').value;
+    const resultDiv = document.getElementById('generateResult');
+    
+    resultDiv.innerHTML = '<p style="color:#FFD700;">Generating...</p>';
+    
+    fetch('/api/key/generate?device=' + encodeURIComponent(device) + '&expire=' + encodeURIComponent(expire), {
+        method: 'GET'
+    })
+    .then(res => res.json())
+    .then(data => {
+        if (data.error) {
+            resultDiv.innerHTML = '<div class="error">Error: ' + data.error + '</div>';
+        } else {
+            resultDiv.innerHTML = '<div class="success">Key generated: <strong style="color:#00ff88;">' + data.key + '</strong><br>Device: ' + data.device + '<br>Expires: ' + data.expiry + '</div>';
+            document.getElementById('device').value = '';
+            document.getElementById('expire').value = '';
+            loadMyKeys();
+        }
+    })
+    .catch(err => {
+        resultDiv.innerHTML = '<div class="error">Error: ' + err.message + '</div>';
+    });
+}
+
+function loadMyKeys() {
+    const listDiv = document.getElementById('myKeysList');
+    listDiv.innerHTML = '<p style="color:#666;">Loading...</p>';
+    
+    fetch('/api/keys/my')
+    .then(res => res.json())
+    .then(data => {
+        if (data.error) {
+            listDiv.innerHTML = '<p style="color:#ff4444;">Error: ' + data.error + '</p>';
+            return;
+        }
+        
+        if (data.keys && data.keys.length > 0) {
+            let html = '';
+            data.keys.forEach(key => {
+                const status = key.used ? '<span class="status-used">USED</span>' : '<span class="status-active">ACTIVE</span>';
+                html += '<div class="key-item">' +
+                    '<span class="key">' + key.key + '</span>' +
+                    '<span class="info">Device: ' + key.device + ' | Expires: ' + key.expiry + '</span>' +
+                    status +
+                '</div>';
+            });
+            listDiv.innerHTML = html;
+            document.getElementById('keyCount').textContent = data.keys.length;
+        } else {
+            listDiv.innerHTML = '<p style="color:#666;">You haven\'t generated any keys yet.</p>';
+            document.getElementById('keyCount').textContent = '0';
+        }
+    })
+    .catch(err => {
+        listDiv.innerHTML = '<p style="color:#ff4444;">Error loading keys</p>';
+    });
+}
+
+function useKey() {
+    const key = document.getElementById('useKeyInput').value.trim();
+    const resultDiv = document.getElementById('useResult');
+    
+    if (!key) {
+        resultDiv.innerHTML = '<div class="error">Please enter a key</div>';
+        return;
+    }
+    
+    resultDiv.innerHTML = '<p style="color:#FFD700;">Checking key...</p>';
+    
+    fetch('/api/key/use', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: key })
+    })
+    .then(res => res.json())
+    .then(data => {
+        if (data.error) {
+            resultDiv.innerHTML = '<div class="error">' + data.error + '</div>';
+        } else {
+            resultDiv.innerHTML = '<div class="success">Key used successfully!<br>Key: ' + data.key + '<br>Used at: ' + data.used_at + '</div>';
+            document.getElementById('useKeyInput').value = '';
+            loadMyKeys();
+        }
+    })
+    .catch(err => {
+        resultDiv.innerHTML = '<div class="error">Error: ' + err.message + '</div>';
+    });
+}
+
+// Load keys on page load
+document.addEventListener('DOMContentLoaded', function() {
+    loadMyKeys();
+});
+</script>
+</body>
+</html>
+'''
+
+ADMIN_DASHBOARD = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>UNIQUE MODS ONLINE - Admin Dashboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { font-family: Arial, sans-serif; background: #0a0a0a; padding: 20px; }
+        .container { max-width: 1000px; margin: 0 auto; }
         .header { background: #1a1a2e; padding: 20px; border-radius: 12px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; }
         .logo { color: #FFD700; font-size: 20px; font-weight: bold; }
         .user { color: #888; }
@@ -365,6 +752,16 @@ DASHBOARD_PAGE = '''
         .btn-users { background: #6c5ce7; color: white; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer; }
         .btn-users:hover { background: #5a4bd1; }
         .header-buttons { display: flex; gap: 10px; flex-wrap: wrap; }
+        .tabs { display: flex; margin-bottom: 20px; border-bottom: 1px solid #333; flex-wrap: wrap; }
+        .tab { padding: 10px 20px; color: #888; cursor: pointer; border-bottom: 3px solid transparent; transition: 0.3s; }
+        .tab.active { color: #FFD700; border-bottom-color: #FFD700; }
+        .tab:hover { color: #FFD700; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .success { color: #00ff88; text-align: center; margin-top: 12px; font-size: 14px; }
+        .error { color: #ff4444; text-align: center; margin-top: 12px; font-size: 14px; }
+        .owner-badge { background: #6c5ce7; color: white; padding: 2px 8px; border-radius: 4px; font-size: 10px; }
+        .key-item .owner { color: #6c5ce7; font-size: 12px; }
     </style>
 </head>
 <body>
@@ -381,53 +778,81 @@ DASHBOARD_PAGE = '''
         </div>
     </div>
 
-    <div class="card">
-        <h2>Generate Random Key</h2>
-        <form action="/api/key/generate" method="GET">
-            <div class="input-group">
-                <input type="text" name="device" placeholder="Device ID" required>
-                <input type="text" name="expire" placeholder="Expiry (e.g. 18-August-2026)" required>
-                <button type="submit">Generate</button>
-            </div>
-        </form>
+    <div class="tabs">
+        <div class="tab active" onclick="showTab('generate')">Generate Key</div>
+        <div class="tab" onclick="showTab('allkeys')">All Keys</div>
+        <div class="tab" onclick="showTab('stats')">Statistics</div>
+        <div class="tab" onclick="showTab('connect')">Connect API</div>
     </div>
 
-    <div class="card">
-        <h2>Generate Custom Key</h2>
-        <form action="/api/key/generate" method="GET">
-            <div class="input-group">
-                <input type="text" name="device" placeholder="Device ID" required>
-                <input type="text" name="expire" placeholder="Expiry (e.g. 18-August-2026)" required>
-                <input type="text" name="custom_key" placeholder="Enter Custom Key" required>
-                <button type="submit">Generate</button>
-            </div>
-        </form>
-    </div>
+    <!-- Generate Key Tab -->
+    <div id="generate-tab" class="tab-content active">
+        <div class="card">
+            <h2>Generate Random Key</h2>
+            <form action="/api/key/generate" method="GET">
+                <div class="input-group">
+                    <input type="text" name="device" placeholder="Device ID" required>
+                    <input type="text" name="expire" placeholder="Expiry (e.g. 18-August-2026)" required>
+                    <button type="submit">Generate</button>
+                </div>
+            </form>
+        </div>
 
-    <div class="card">
-        <h2>All Keys</h2>
-        <div class="key-list">
-            {% for key in keys %}
-            <div class="key-item">
-                <span class="key">{{ key.key }}</span>
-                <span class="info">Device: {{ key.device }} | Expires: {{ key.expiry }}</span>
-                <span class="{% if key.used %}status-used{% else %}status-active{% endif %}">
-                    {% if key.used %}USED{% else %}ACTIVE{% endif %}
-                </span>
-            </div>
-            {% else %}
-            <p style="color:#666;text-align:center;">No keys</p>
-            {% endfor %}
+        <div class="card">
+            <h2>Generate Custom Key</h2>
+            <form action="/api/key/generate" method="GET">
+                <div class="input-group">
+                    <input type="text" name="device" placeholder="Device ID" required>
+                    <input type="text" name="expire" placeholder="Expiry (e.g. 18-August-2026)" required>
+                    <input type="text" name="custom_key" placeholder="Enter Custom Key" required>
+                    <button type="submit">Generate</button>
+                </div>
+            </form>
         </div>
     </div>
 
-    <div class="card">
-        <h2>Statistics</h2>
-        <div class="stats">
-            <div class="stat-box"><div class="num">{{ stats.total }}</div><div class="label">Total Keys</div></div>
-            <div class="stat-box"><div class="num">{{ stats.active }}</div><div class="label">Active</div></div>
-            <div class="stat-box"><div class="num">{{ stats.used }}</div><div class="label">Used</div></div>
-            <div class="stat-box"><div class="num">{{ stats.users }}</div><div class="label">Total Users</div></div>
+    <!-- All Keys Tab -->
+    <div id="allkeys-tab" class="tab-content">
+        <div class="card">
+            <h2>All Keys</h2>
+            <div class="key-list">
+                {% for key in keys %}
+                <div class="key-item">
+                    <span class="key">{{ key.key }}</span>
+                    <span class="info">Device: {{ key.device }} | Expires: {{ key.expiry }}</span>
+                    <span class="owner">Owner: {{ key.owner_username }}</span>
+                    <span class="{% if key.used %}status-used{% else %}status-active{% endif %}">
+                        {% if key.used %}USED{% else %}ACTIVE{% endif %}
+                    </span>
+                </div>
+                {% else %}
+                <p style="color:#666;text-align:center;">No keys</p>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+
+    <!-- Statistics Tab -->
+    <div id="stats-tab" class="tab-content">
+        <div class="card">
+            <h2>Statistics</h2>
+            <div class="stats">
+                <div class="stat-box"><div class="num">{{ stats.total }}</div><div class="label">Total Keys</div></div>
+                <div class="stat-box"><div class="num">{{ stats.active }}</div><div class="label">Active</div></div>
+                <div class="stat-box"><div class="num">{{ stats.used }}</div><div class="label">Used</div></div>
+                <div class="stat-box"><div class="num">{{ stats.users }}</div><div class="label">Total Users</div></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Connect API Tab -->
+    <div id="connect-tab" class="tab-content">
+        <div class="card">
+            <h2>API Connect Status</h2>
+            <div id="apiStatus">
+                <p style="color:#666;">Checking API status...</p>
+            </div>
+            <button onclick="checkAPI()" style="background:#FFD700;color:#0a0a0a;border:none;padding:10px 24px;border-radius:6px;font-weight:bold;cursor:pointer;margin-top:12px;">Check API</button>
         </div>
     </div>
 
@@ -441,6 +866,43 @@ DASHBOARD_PAGE = '''
     </div>
     <div class="made">UNIQUE MODS ONLINE &copy; 2026</div>
 </div>
+
+<script>
+function showTab(tab) {
+    document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+    document.getElementById(tab + '-tab').classList.add('active');
+    document.querySelector('.tab[onclick="showTab(\'' + tab + '\')"]').classList.add('active');
+}
+
+function checkAPI() {
+    const statusDiv = document.getElementById('apiStatus');
+    statusDiv.innerHTML = '<p style="color:#FFD700;">Connecting to API...</p>';
+    
+    fetch('/api/connect')
+    .then(res => res.json())
+    .then(data => {
+        if (data.error) {
+            statusDiv.innerHTML = '<div class="error">Error: ' + data.error + '</div>';
+        } else {
+            statusDiv.innerHTML = '<div class="success">' +
+                'Status: ' + data.status + '<br>' +
+                'Made by: ' + data.made_by + '<br>' +
+                'User: ' + data.user + '<br>' +
+                'Admin: ' + data.is_admin +
+            '</div>';
+        }
+    })
+    .catch(err => {
+        statusDiv.innerHTML = '<div class="error">Error: ' + err.message + '</div>';
+    });
+}
+
+// Auto check API on page load
+document.addEventListener('DOMContentLoaded', function() {
+    checkAPI();
+});
+</script>
 </body>
 </html>
 '''
@@ -454,7 +916,7 @@ USERS_PAGE = '''
     <style>
         * { margin:0; padding:0; box-sizing:border-box; }
         body { font-family: Arial, sans-serif; background: #0a0a0a; padding: 20px; }
-        .container { max-width: 900px; margin: 0 auto; }
+        .container { max-width: 1000px; margin: 0 auto; }
         .header { background: #1a1a2e; padding: 20px; border-radius: 12px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; }
         .logo { color: #FFD700; font-size: 20px; font-weight: bold; }
         .back-btn { background: #FFD700; color: #0a0a0a; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer; font-weight: bold; }
@@ -469,6 +931,8 @@ USERS_PAGE = '''
         .delete-btn:hover { background: #cc0000; }
         .footer { text-align: center; margin-top: 30px; color: #444; font-size: 12px; }
         .footer a { color: #FFD700; text-decoration: none; }
+        .agreed-badge { background: #00ff88; color: #0a0a0a; padding: 2px 8px; border-radius: 4px; font-size: 10px; }
+        .not-agreed-badge { background: #ff4444; color: white; padding: 2px 8px; border-radius: 4px; font-size: 10px; }
     </style>
 </head>
 <body>
@@ -491,6 +955,11 @@ USERS_PAGE = '''
                     <span class="email">{{ user.email }}</span>
                     {% if user.is_admin == 1 %}
                     <span class="admin-badge">ADMIN</span>
+                    {% endif %}
+                    {% if user.agreed_to_terms == 1 %}
+                    <span class="agreed-badge">Agreed to Terms</span>
+                    {% else %}
+                    <span class="not-agreed-badge">Not Agreed</span>
                     {% endif %}
                 </div>
                 <div style="display: flex; gap: 8px; align-items: center;">
@@ -546,69 +1015,90 @@ def login():
         
         user = get_user_by_email(email)
         
-        if user and user['password'] == hashlib.md5(password.encode()).hexdigest() and user['is_admin'] == 1:
+        if user and user['password'] == hashlib.md5(password.encode()).hexdigest():
             session['user_id'] = user['id']
             session['username'] = user['username']
             session['email'] = user['email']
-            session['is_admin'] = True
+            session['is_admin'] = True if user['is_admin'] == 1 else False
             return redirect('/dashboard')
         else:
-            return render_template_string(LOGIN_PAGE, error="Invalid credentials or not admin")
+            return render_template_string(LOGIN_PAGE, error="Invalid credentials")
     
-    return render_template_string(LOGIN_PAGE, error=None)
+    return render_template_string(LOGIN_PAGE, error=None, signup_error=None, signup_success=None)
 
-@app.route('/signup', methods=['GET', 'POST'])
-def signup():
-    if request.method == 'POST':
-        username = request.form.get('username')
-        email = request.form.get('email')
-        password = request.form.get('password')
-        confirm_password = request.form.get('confirm_password')
-        
-        if not username or not email or not password:
-            return render_template_string(SIGNUP_PAGE, error="All fields are required")
-        
-        if len(username) < 3:
-            return render_template_string(SIGNUP_PAGE, error="Username must be at least 3 characters")
-        
-        if '@' not in email or '.' not in email:
-            return render_template_string(SIGNUP_PAGE, error="Invalid email address")
-        
-        if len(password) < 6:
-            return render_template_string(SIGNUP_PAGE, error="Password must be at least 6 characters")
-        
-        if password != confirm_password:
-            return render_template_string(SIGNUP_PAGE, error="Passwords do not match")
-        
-        existing_user = get_user_by_email(email)
-        if existing_user:
-            return render_template_string(SIGNUP_PAGE, error="Email already registered")
-        
-        existing_username = get_user_by_username(username)
-        if existing_username:
-            return render_template_string(SIGNUP_PAGE, error="Username already taken")
-        
-        try:
-            insert_user(username, email, password)
-            return render_template_string(SIGNUP_PAGE, success='Account created successfully! <a href="/" style="color:#FFD700;">Login here</a>')
-        except Exception as e:
-            return render_template_string(SIGNUP_PAGE, error="Error: " + str(e))
+@app.route('/signup', methods=['POST'])
+def signup_post():
+    username = request.form.get('username')
+    email = request.form.get('email')
+    password = request.form.get('password')
+    confirm_password = request.form.get('confirm_password')
+    agree_terms = request.form.get('agree_terms')
     
-    return render_template_string(SIGNUP_PAGE, error=None, success=None)
+    if not username or not email or not password:
+        return render_template_string(LOGIN_PAGE, signup_error="All fields are required")
+    
+    if len(username) < 3:
+        return render_template_string(LOGIN_PAGE, signup_error="Username must be at least 3 characters")
+    
+    if '@' not in email or '.' not in email:
+        return render_template_string(LOGIN_PAGE, signup_error="Invalid email address")
+    
+    if len(password) < 6:
+        return render_template_string(LOGIN_PAGE, signup_error="Password must be at least 6 characters")
+    
+    if password != confirm_password:
+        return render_template_string(LOGIN_PAGE, signup_error="Passwords do not match")
+    
+    if not agree_terms:
+        return render_template_string(LOGIN_PAGE, signup_error="You must agree to the Privacy Policy and Terms of Service")
+    
+    existing_user = get_user_by_email(email)
+    if existing_user:
+        return render_template_string(LOGIN_PAGE, signup_error="Email already registered")
+    
+    existing_username = get_user_by_username(username)
+    if existing_username:
+        return render_template_string(LOGIN_PAGE, signup_error="Username already taken")
+    
+    try:
+        insert_user(username, email, password, True)
+        return render_template_string(LOGIN_PAGE, signup_success='Account created successfully! Please login.')
+    except Exception as e:
+        return render_template_string(LOGIN_PAGE, signup_error="Error: " + str(e))
+
+@app.route('/privacy')
+def privacy():
+    return render_template_string(PRIVACY_PAGE)
+
+@app.route('/terms')
+def terms():
+    return render_template_string(TERMS_PAGE)
 
 @app.route('/dashboard')
 def dashboard():
-    if 'user_id' not in session or not is_admin():
+    if 'user_id' not in session:
         return redirect('/')
     
-    keys = get_all_keys()
-    stats = get_stats()
+    user = get_user_by_id(session['user_id'])
     
-    return render_template_string(DASHBOARD_PAGE,
-        username=session.get('username', 'Admin'),
-        keys=keys,
-        stats=stats
-    )
+    if not user:
+        session.clear()
+        return redirect('/')
+    
+    if user['is_admin'] == 1:
+        keys = get_all_keys()
+        stats = get_stats()
+        return render_template_string(ADMIN_DASHBOARD,
+            username=session.get('username', 'Admin'),
+            keys=keys,
+            stats=stats
+        )
+    else:
+        return render_template_string(USER_DASHBOARD,
+            username=session.get('username', 'User'),
+            email=session.get('email', ''),
+            created_at=user['created_at']
+        )
 
 @app.route('/users')
 def list_users():
@@ -627,25 +1117,39 @@ def logout():
 def telegram():
     return redirect('https://t.me/+FsOBvTfVSjRlNmFl')
 
-# ============ API ============
+# ============ API ENDPOINTS ============
 
-@app.route('/api/connect')
+# 1. CONNECT - Check API status
+@app.route('/api/connect', methods=['GET'])
 def api_connect():
-    if not is_admin():
-        return jsonify({'error': 'Unauthorized'}), 401
-    return jsonify({'status': 'online', 'made_by': 'Farhan Modz'})
-
-@app.route('/api/key/generate')
-def api_generate():
-    if not is_admin():
-        return jsonify({'error': 'Unauthorized'}), 401
+    if not is_logged_in():
+        return jsonify({'error': 'Unauthorized - Please login first'}), 401
     
-    device = request.args.get('device')
-    expiry = request.args.get('expire')
-    custom_key = request.args.get('custom_key')
+    return jsonify({
+        'status': 'online',
+        'made_by': 'Farhan Modz',
+        'user': session.get('username'),
+        'is_admin': is_admin()
+    })
+
+# 2. GENERATE KEY - User generates their own key
+@app.route('/api/key/generate', methods=['GET', 'POST'])
+def api_generate():
+    if not is_logged_in():
+        return jsonify({'error': 'Unauthorized - Please login first'}), 401
+    
+    if request.method == 'POST':
+        data = request.get_json()
+        device = data.get('device') if data else None
+        expiry = data.get('expire') if data else None
+        custom_key = data.get('custom_key') if data else None
+    else:
+        device = request.args.get('device')
+        expiry = request.args.get('expire')
+        custom_key = request.args.get('custom_key')
     
     if not device or not expiry:
-        return jsonify({'error': 'Missing parameters'}), 400
+        return jsonify({'error': 'Missing parameters: device and expire required'}), 400
     
     chars = string.ascii_letters + string.digits
     if custom_key:
@@ -669,88 +1173,214 @@ def api_generate():
         key = ''.join(secrets.choice(chars) for _ in range(32))
     
     try:
-        insert_key(key, device, expiry, session['user_id'])
+        username = session.get('username')
+        insert_key(key, device, expiry, session['user_id'], username)
+        return jsonify({
+            'success': True,
+            'key': key,
+            'device': device,
+            'expiry': expiry,
+            'owner': username
+        })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-    
-    return jsonify({'key': key})
 
-@app.route('/api/key/use/<key>', methods=['POST'])
-def api_use_key(key):
-    if not is_admin():
-        return jsonify({'error': 'Unauthorized'}), 401
+# 3. USE KEY - User uses their own key (only owner can use)
+@app.route('/api/key/use', methods=['POST'])
+def api_use_key():
+    if not is_logged_in():
+        return jsonify({'error': 'Unauthorized - Please login first'}), 401
     
     data = request.get_json()
-    device = data.get('device') if data else request.args.get('device')
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+    
+    key = data.get('key')
+    if not key:
+        return jsonify({'error': 'Key is required'}), 400
     
     key_record = get_key_by_key(key)
     
     if not key_record:
         return jsonify({'error': 'Key not found'}), 404
     
+    # Check if user can use this key
+    allowed, message = can_user_use_key(key_record, session['user_id'])
+    if not allowed:
+        return jsonify({'error': message}), 403
+    
     if key_record['used'] == 1:
         return jsonify({'error': 'Key already used'}), 400
     
     try:
-        update_key_used(key, device or 'unknown')
+        update_key_used(key, session['user_id'], session['username'])
+        return jsonify({
+            'success': True,
+            'key': key,
+            'used_by': session['username'],
+            'used_at': datetime.now().isoformat()
+        })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-    
-    return jsonify({'success': True})
 
-@app.route('/api/keys/lists')
-def api_keys_lists():
-    if not is_admin():
-        return jsonify({'error': 'Unauthorized'}), 401
+# 4. MY KEYS - Get current user's keys
+@app.route('/api/keys/my', methods=['GET'])
+def api_my_keys():
+    if not is_logged_in():
+        return jsonify({'error': 'Unauthorized - Please login first'}), 401
     
-    keys = get_all_keys()
-    return jsonify({'keys': keys})
-
-@app.route('/api/key/use/lists')
-def api_used_keys():
-    if not is_admin():
-        return jsonify({'error': 'Unauthorized'}), 401
-    
-    conn = get_db()
-    keys = conn.execute('SELECT key, device, expiry, used_by, used_at FROM keys WHERE used = 1 ORDER BY id DESC LIMIT 100').fetchall()
-    conn.close()
-    
-    return jsonify({'used_keys': [dict(row) for row in keys]})
-
-@app.route('/api/stats')
-def api_stats():
-    if not is_admin():
-        return jsonify({'error': 'Unauthorized'}), 401
-    
-    stats = get_stats()
+    keys = get_keys_by_user(session['user_id'])
     return jsonify({
-        'total_keys': stats['total'],
-        'active_keys': stats['active'],
-        'used_keys': stats['used'],
-        'total_users': stats['users']
+        'total': len(keys),
+        'keys': keys
     })
 
-@app.route('/api/user/delete/<int:user_id>', methods=['DELETE'])
-def delete_user(user_id):
+# 5. ALL KEYS - Admin only
+@app.route('/api/keys/all', methods=['GET'])
+def api_all_keys():
+    if not is_logged_in():
+        return jsonify({'error': 'Unauthorized - Please login first'}), 401
+    
     if not is_admin():
-        return jsonify({'error': 'Unauthorized'}), 401
+        return jsonify({'error': 'Admin only'}), 403
+    
+    keys = get_all_keys()
+    return jsonify({
+        'total': len(keys),
+        'keys': keys
+    })
+
+# 6. USED KEYS - Admin only
+@app.route('/api/keys/used', methods=['GET'])
+def api_used_keys():
+    if not is_logged_in():
+        return jsonify({'error': 'Unauthorized - Please login first'}), 401
+    
+    if not is_admin():
+        return jsonify({'error': 'Admin only'}), 403
+    
+    conn = get_db()
+    keys = conn.execute('SELECT key, device, expiry, used_by, used_at, owner_username FROM keys WHERE used = 1 ORDER BY id DESC LIMIT 100').fetchall()
+    conn.close()
+    
+    return jsonify({
+        'total': len(keys),
+        'used_keys': [dict(row) for row in keys]
+    })
+
+# 7. STATS - Admin only
+@app.route('/api/stats', methods=['GET'])
+def api_stats():
+    if not is_logged_in():
+        return jsonify({'error': 'Unauthorized - Please login first'}), 401
+    
+    if not is_admin():
+        return jsonify({'error': 'Admin only'}), 403
+    
+    stats = get_stats()
+    return jsonify(stats)
+
+# 8. DELETE USER - Admin only
+@app.route('/api/user/delete/<int:user_id>', methods=['DELETE'])
+def api_delete_user(user_id):
+    if not is_logged_in():
+        return jsonify({'error': 'Unauthorized - Please login first'}), 401
+    
+    if not is_admin():
+        return jsonify({'error': 'Admin only'}), 403
     
     if user_id == session.get('user_id'):
         return jsonify({'error': 'Cannot delete yourself'}), 400
     
     try:
         delete_user_by_id(user_id)
-        return jsonify({'success': True})
+        return jsonify({'success': True, 'message': 'User deleted successfully'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/user/all')
+# 9. ALL USERS - Admin only
+@app.route('/api/user/all', methods=['GET'])
 def api_all_users():
+    if not is_logged_in():
+        return jsonify({'error': 'Unauthorized - Please login first'}), 401
+    
     if not is_admin():
-        return jsonify({'error': 'Unauthorized'}), 401
+        return jsonify({'error': 'Admin only'}), 403
     
     users = get_all_users()
-    return jsonify({'users': users})
+    return jsonify({
+        'total': len(users),
+        'users': users
+    })
+
+# 10. CHECK KEY - Check key status (any logged in user)
+@app.route('/api/key/check/<key>', methods=['GET'])
+def api_check_key(key):
+    if not is_logged_in():
+        return jsonify({'error': 'Unauthorized - Please login first'}), 401
+    
+    key_record = get_key_by_key(key)
+    
+    if not key_record:
+        return jsonify({'exists': False, 'message': 'Key not found'}), 404
+    
+    # Check if user is the owner
+    is_owner = key_record['user_id'] == session['user_id']
+    
+    return jsonify({
+        'exists': True,
+        'key': key_record['key'],
+        'device': key_record['device'],
+        'expiry': key_record['expiry'],
+        'used': bool(key_record['used']),
+        'status': 'USED' if key_record['used'] == 1 else 'ACTIVE',
+        'owner': key_record['owner_username'],
+        'is_owner': is_owner
+    })
+
+# 11. PROFILE - Get current user info
+@app.route('/api/profile', methods=['GET'])
+def api_profile():
+    if not is_logged_in():
+        return jsonify({'error': 'Unauthorized - Please login first'}), 401
+    
+    user = get_user_by_id(session['user_id'])
+    
+    if not user:
+        session.clear()
+        return jsonify({'error': 'User not found'}), 404
+    
+    keys = get_keys_by_user(session['user_id'])
+    
+    return jsonify({
+        'id': user['id'],
+        'username': user['username'],
+        'email': user['email'],
+        'is_admin': bool(user['is_admin']),
+        'created_at': user['created_at'],
+        'keys_generated': len(keys),
+        'agreed_to_terms': bool(user['agreed_to_terms'])
+    })
+
+# 12. KEY HISTORY - Get key usage history (owner or admin)
+@app.route('/api/key/history/<key>', methods=['GET'])
+def api_key_history(key):
+    if not is_logged_in():
+        return jsonify({'error': 'Unauthorized - Please login first'}), 401
+    
+    key_record = get_key_by_key(key)
+    if not key_record:
+        return jsonify({'error': 'Key not found'}), 404
+    
+    # Only owner or admin can view history
+    if key_record['user_id'] != session['user_id'] and not is_admin():
+        return jsonify({'error': 'Access denied - Not the owner'}), 403
+    
+    history = get_key_usage_history(key)
+    return jsonify({
+        'key': key,
+        'history': history
+    })
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)
