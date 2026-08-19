@@ -7,6 +7,7 @@ import os
 import hashlib
 import sqlite3
 import base64
+import time
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
@@ -58,15 +59,6 @@ def init_db():
         )
     ''')
     
-    # Default admin account
-    try:
-        cursor.execute('''
-            INSERT OR IGNORE INTO users (username, password, email, is_admin, created_at) 
-            VALUES (?, ?, ?, ?, ?)
-        ''', ('admin', hashlib.md5('admin123'.encode()).hexdigest(), 'admin@unique.com', 1, datetime.now().isoformat()))
-    except:
-        pass
-    
     conn.commit()
     conn.close()
     print("Database initialized!")
@@ -80,27 +72,18 @@ init_db()
 
 # ============ HELPER FUNCTIONS ============
 
-def is_admin():
-    return session.get('is_admin', False)
-
 def is_logged_in():
     return session.get('user_id') is not None
 
-def get_user_by_email(email):
+def get_user_by_id(user_id):
     conn = get_db()
-    user = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
+    user = conn.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
     conn.close()
     return user
 
 def get_user_by_username(username):
     conn = get_db()
     user = conn.execute('SELECT * FROM users WHERE username = ?', (username,)).fetchone()
-    conn.close()
-    return user
-
-def get_user_by_id(user_id):
-    conn = get_db()
-    user = conn.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
     conn.close()
     return user
 
@@ -141,7 +124,7 @@ def insert_user(username, email, password):
     cursor = conn.execute('''
         INSERT INTO users (username, email, password, is_admin, created_at)
         VALUES (?, ?, ?, ?, ?)
-    ''', (username, email, hashlib.md5(password.encode()).hexdigest(), 0, datetime.now().isoformat()))
+    ''', (username, email, hashlib.md5(password.encode()).hexdigest(), 1, datetime.now().isoformat()))
     user_id = cursor.lastrowid
     conn.commit()
     conn.close()
@@ -176,7 +159,7 @@ def delete_user_by_id(user_id):
 
 def get_all_users():
     conn = get_db()
-    users = conn.execute('SELECT id, username, email, is_admin, created_at FROM users').fetchall()
+    users = conn.execute('SELECT id, username, email, created_at FROM users').fetchall()
     conn.close()
     return [dict(row) for row in users]
 
@@ -186,13 +169,450 @@ def get_key_usage_history(key):
     conn.close()
     return [dict(row) for row in history]
 
+def generate_unique_username():
+    """Generate a unique username"""
+    adjectives = ['happy', 'cool', 'smart', 'brave', 'swift', 'lucky', 'wild', 'mighty', 'epic', 'hero']
+    nouns = ['user', 'player', 'gamer', 'master', 'pro', 'star', 'legend', 'champ', 'ace', 'king']
+    
+    import random
+    base = random.choice(adjectives) + random.choice(nouns)
+    username = base + str(random.randint(100, 999))
+    
+    # Check if exists
+    existing = get_user_by_username(username)
+    if existing:
+        return generate_unique_username()
+    return username
+
+def create_user_account():
+    """Create a new user account with unique details"""
+    username = generate_unique_username()
+    email = username + '@unique.com'
+    password = secrets.token_hex(8)
+    
+    user_id = insert_user(username, email, password)
+    
+    return {
+        'id': user_id,
+        'username': username,
+        'email': email,
+        'password': password
+    }
+
 # ============ HTML ============
 
-ADMIN_DASHBOARD = '''
+AGREE_PAGE = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>UNIQUE MODS ONLINE - Admin Dashboard</title>
+    <title>UNIQUE MODS ONLINE</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { 
+            font-family: Arial, sans-serif; 
+            background: #0a0a0a; 
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            min-height: 100vh;
+            background: radial-gradient(circle at center, #1a1a2e 0%, #0a0a0a 100%);
+        }
+        .container { 
+            background: rgba(26, 26, 46, 0.95); 
+            padding: 50px 40px; 
+            border-radius: 20px; 
+            width: 500px; 
+            max-width: 92%; 
+            box-shadow: 0 20px 60px rgba(255,215,0,0.15);
+            border: 1px solid rgba(255,215,0,0.1);
+            text-align: center;
+        }
+        .logo { 
+            font-size: 28px; 
+            font-weight: 800; 
+            color: #FFD700; 
+            margin-bottom: 10px;
+            letter-spacing: 1px;
+        }
+        .sub { 
+            color: #888; 
+            font-size: 14px; 
+            margin-bottom: 30px;
+        }
+        .icon { font-size: 60px; margin-bottom: 20px; }
+        .info-box {
+            background: #0d0d1a;
+            padding: 20px;
+            border-radius: 12px;
+            margin: 20px 0;
+            border: 1px solid #222;
+        }
+        .info-box p {
+            color: #aaa;
+            font-size: 14px;
+            line-height: 1.8;
+        }
+        .info-box strong {
+            color: #FFD700;
+        }
+        .btn {
+            width: 100%;
+            padding: 16px;
+            background: linear-gradient(135deg, #FFD700, #f5c400);
+            color: #0a0a0a;
+            border: none;
+            border-radius: 10px;
+            font-size: 18px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(255,215,0,0.3);
+        }
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .loading {
+            display: none;
+            margin: 15px 0;
+        }
+        .loading.active {
+            display: block;
+        }
+        .spinner {
+            width: 40px;
+            height: 40px;
+            margin: 0 auto;
+            border: 4px solid #333;
+            border-top: 4px solid #FFD700;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .status-text {
+            color: #FFD700;
+            font-size: 14px;
+            margin-top: 10px;
+        }
+        .footer { 
+            margin-top: 25px; 
+            color: #555; 
+            font-size: 12px; 
+        }
+        .footer a { 
+            color: #FFD700; 
+            text-decoration: none; 
+        }
+        .checkbox-group { 
+            display: flex; 
+            align-items: center; 
+            gap: 10px; 
+            margin: 20px 0;
+            text-align: left;
+        }
+        .checkbox-group input[type="checkbox"] { 
+            width: 20px; 
+            height: 20px; 
+            accent-color: #FFD700; 
+            cursor: pointer; 
+        }
+        .checkbox-group label { 
+            color: #aaa; 
+            font-size: 14px; 
+            cursor: pointer; 
+        }
+        .checkbox-group a { 
+            color: #FFD700; 
+            text-decoration: none; 
+        }
+        .checkbox-group a:hover { text-decoration: underline; }
+        .countdown {
+            color: #FFD700;
+            font-size: 20px;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+        .credentials {
+            background: #0d0d1a;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 15px 0;
+            border: 1px solid #00ff88;
+            display: none;
+        }
+        .credentials.show {
+            display: block;
+        }
+        .credentials p {
+            color: #00ff88;
+            font-size: 13px;
+            font-family: monospace;
+            margin: 5px 0;
+        }
+        .credentials strong {
+            color: #aaa;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="icon">🚀</div>
+    <div class="logo">UNIQUE MODS ONLINE</div>
+    <div class="sub">Welcome to the Platform</div>
+    
+    <div class="info-box">
+        <p>By clicking "I Agree", you will be automatically registered.</p>
+        <p>Your account will be created in <strong>10 seconds</strong>.</p>
+        <p style="margin-top:10px;color:#666;font-size:12px;">You will be redirected to the dashboard automatically.</p>
+    </div>
+    
+    <div class="checkbox-group">
+        <input type="checkbox" id="agreeTerms" onchange="toggleButton()">
+        <label for="agreeTerms">
+            I agree to the <a href="/privacy" target="_blank">Privacy Policy</a> and 
+            <a href="/terms" target="_blank">Terms of Service</a>
+        </label>
+    </div>
+    
+    <button id="agreeBtn" class="btn" disabled onclick="startAgreement()">I AGREE</button>
+    
+    <div id="loadingSection" class="loading">
+        <div class="spinner"></div>
+        <div id="countdownDisplay" class="countdown">10</div>
+        <div id="statusText" class="status-text">Creating your account...</div>
+    </div>
+    
+    <div id="credentials" class="credentials">
+        <p><strong>Account Created!</strong></p>
+        <p>Username: <span id="credUsername"></span></p>
+        <p>Email: <span id="credEmail"></span></p>
+        <p>Password: <span id="credPassword"></span></p>
+        <p style="color:#666;font-size:11px;margin-top:10px;">Redirecting to dashboard...</p>
+    </div>
+    
+    <div class="footer">
+        Made by: <a href="https://t.me/+FsOBvTfVSjRlNmFl">Farhan Modz</a>
+    </div>
+</div>
+
+<script>
+let countdown = 10;
+let timer = null;
+
+function toggleButton() {
+    const checkbox = document.getElementById('agreeTerms');
+    const btn = document.getElementById('agreeBtn');
+    btn.disabled = !checkbox.checked;
+}
+
+function startAgreement() {
+    const btn = document.getElementById('agreeBtn');
+    btn.disabled = true;
+    document.getElementById('loadingSection').classList.add('active');
+    document.getElementById('statusText').textContent = 'Creating your account...';
+    
+    // Start countdown
+    timer = setInterval(() => {
+        countdown--;
+        document.getElementById('countdownDisplay').textContent = countdown;
+        
+        if (countdown <= 0) {
+            clearInterval(timer);
+            createAccount();
+        }
+    }, 1000);
+}
+
+function createAccount() {
+    document.getElementById('statusText').textContent = 'Generating your account...';
+    
+    fetch('/api/create-account', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+    })
+    .then(res => res.json())
+    .then(data => {
+        if (data.error) {
+            document.getElementById('statusText').textContent = 'Error: ' + data.error;
+            return;
+        }
+        
+        // Show credentials
+        document.getElementById('credentials').classList.add('show');
+        document.getElementById('credUsername').textContent = data.username;
+        document.getElementById('credEmail').textContent = data.email;
+        document.getElementById('credPassword').textContent = data.password;
+        document.getElementById('statusText').textContent = 'Account created successfully!';
+        
+        // Auto login
+        setTimeout(() => {
+            window.location.href = '/dashboard';
+        }, 3000);
+    })
+    .catch(err => {
+        document.getElementById('statusText').textContent = 'Error: ' + err.message;
+    });
+}
+</script>
+</body>
+</html>
+'''
+
+PRIVACY_PAGE = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>UNIQUE MODS - Privacy Policy</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { font-family: Arial, sans-serif; background: #0a0a0a; padding: 20px; }
+        .container { max-width: 800px; margin: 0 auto; background: #1a1a2e; padding: 40px; border-radius: 16px; box-shadow: 0 0 40px rgba(255,215,0,0.1); }
+        .logo { text-align: center; font-size: 24px; font-weight: bold; color: #FFD700; margin-bottom: 20px; }
+        h2 { color: #FFD700; margin: 20px 0 10px 0; }
+        p, li { color: #aaa; line-height: 1.8; font-size: 14px; }
+        ul { padding-left: 20px; }
+        .back-btn { display: inline-block; padding: 10px 24px; background: #FFD700; color: #0a0a0a; text-decoration: none; border-radius: 8px; font-weight: bold; margin-top: 20px; }
+        .back-btn:hover { background: #e6c200; }
+        .footer { text-align: center; margin-top: 30px; color: #444; font-size: 12px; }
+        .footer a { color: #FFD700; text-decoration: none; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="logo">UNIQUE MODS</div>
+    <h1 style="color:#FFD700;font-size:28px;margin-bottom:10px;">Privacy Policy</h1>
+    <p>Last updated: August 19, 2026</p>
+    
+    <h2>1. Information We Collect</h2>
+    <ul>
+        <li><strong>Account Information:</strong> Username, email address, and hashed password</li>
+        <li><strong>Usage Data:</strong> Key usage history and device information</li>
+        <li><strong>Cookies:</strong> Session cookies for authentication</li>
+    </ul>
+    
+    <h2>2. How We Use Your Information</h2>
+    <ul>
+        <li>To provide and maintain our service</li>
+        <li>To authenticate your identity</li>
+        <li>To track key usage and prevent abuse</li>
+        <li>To communicate with you about updates</li>
+    </ul>
+    
+    <h2>3. Data Security</h2>
+    <ul>
+        <li>Passwords are stored using MD5 hashing</li>
+        <li>All data is stored in encrypted SQLite database</li>
+        <li>We implement session-based authentication</li>
+    </ul>
+    
+    <h2>4. Data Sharing</h2>
+    <ul>
+        <li>We do not sell or share your personal data</li>
+        <li>Key usage history is logged for security</li>
+    </ul>
+    
+    <h2>5. Your Rights</h2>
+    <ul>
+        <li>You can delete your account at any time</li>
+        <li>You can request data export</li>
+    </ul>
+    
+    <h2>6. Contact</h2>
+    <p>For privacy concerns, contact us via <a href="https://t.me/+FsOBvTfVSjRlNmFl" style="color:#FFD700;">Telegram</a></p>
+    
+    <a href="/" class="back-btn">Back</a>
+    
+    <div class="footer">
+        Made by: <a href="https://t.me/+FsOBvTfVSjRlNmFl">Farhan Modz</a>
+    </div>
+</div>
+</body>
+</html>
+'''
+
+TERMS_PAGE = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>UNIQUE MODS - Terms of Service</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { font-family: Arial, sans-serif; background: #0a0a0a; padding: 20px; }
+        .container { max-width: 800px; margin: 0 auto; background: #1a1a2e; padding: 40px; border-radius: 16px; box-shadow: 0 0 40px rgba(255,215,0,0.1); }
+        .logo { text-align: center; font-size: 24px; font-weight: bold; color: #FFD700; margin-bottom: 20px; }
+        h2 { color: #FFD700; margin: 20px 0 10px 0; }
+        p, li { color: #aaa; line-height: 1.8; font-size: 14px; }
+        ul { padding-left: 20px; }
+        .back-btn { display: inline-block; padding: 10px 24px; background: #FFD700; color: #0a0a0a; text-decoration: none; border-radius: 8px; font-weight: bold; margin-top: 20px; }
+        .back-btn:hover { background: #e6c200; }
+        .footer { text-align: center; margin-top: 30px; color: #444; font-size: 12px; }
+        .footer a { color: #FFD700; text-decoration: none; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="logo">UNIQUE MODS</div>
+    <h1 style="color:#FFD700;font-size:28px;margin-bottom:10px;">Terms of Service</h1>
+    <p>Last updated: August 19, 2026</p>
+    
+    <h2>1. Acceptance of Terms</h2>
+    <p>By using UNIQUE MODS, you agree to these terms.</p>
+    
+    <h2>2. User Accounts</h2>
+    <ul>
+        <li>You must provide accurate information</li>
+        <li>You are responsible for your account security</li>
+        <li>One account per user</li>
+    </ul>
+    
+    <h2>3. Key Usage</h2>
+    <ul>
+        <li>Keys are for personal use only</li>
+        <li>Sharing keys is prohibited</li>
+        <li>Keys have expiry dates</li>
+    </ul>
+    
+    <h2>4. Prohibited Activities</h2>
+    <ul>
+        <li>Unauthorized access to system</li>
+        <li>Abusing the key system</li>
+        <li>Creating multiple accounts</li>
+    </ul>
+    
+    <h2>5. Account Termination</h2>
+    <ul>
+        <li>We reserve the right to terminate accounts</li>
+        <li>Violation of terms results in suspension</li>
+    </ul>
+    
+    <h2>6. Changes to Terms</h2>
+    <p>We may update terms with notice to users.</p>
+    
+    <a href="/" class="back-btn">Back</a>
+    
+    <div class="footer">
+        Made by: <a href="https://t.me/+FsOBvTfVSjRlNmFl">Farhan Modz</a>
+    </div>
+</div>
+</body>
+</html>
+'''
+
+DASHBOARD = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>UNIQUE MODS - Dashboard</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         * { margin:0; padding:0; box-sizing:border-box; }
@@ -202,9 +622,6 @@ ADMIN_DASHBOARD = '''
         .logo { color: #FFD700; font-size: 20px; font-weight: bold; }
         .user { color: #888; }
         .user span { color: #FFD700; }
-        .admin-badge { background: #FFD700; color: #0a0a0a; padding: 2px 10px; border-radius: 4px; font-size: 11px; font-weight: bold; }
-        .logout-btn { background: #ff4444; color: white; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer; }
-        .logout-btn:hover { background: #cc0000; }
         .card { background: #1a1a2e; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
         .card h2 { color: #FFD700; font-size: 18px; margin-bottom: 12px; }
         .card p { color: #aaa; font-size: 14px; }
@@ -230,9 +647,6 @@ ADMIN_DASHBOARD = '''
         .stat-box { background: #0d0d1a; padding: 12px; border-radius: 8px; text-align: center; }
         .stat-box .num { color: #FFD700; font-size: 22px; font-weight: bold; }
         .stat-box .label { color: #666; font-size: 12px; }
-        .btn-users { background: #6c5ce7; color: white; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer; }
-        .btn-users:hover { background: #5a4bd1; }
-        .header-buttons { display: flex; gap: 10px; flex-wrap: wrap; }
         .tabs { display: flex; margin-bottom: 20px; border-bottom: 1px solid #333; flex-wrap: wrap; }
         .tab { padding: 10px 20px; color: #888; cursor: pointer; border-bottom: 3px solid transparent; transition: 0.3s; }
         .tab.active { color: #FFD700; border-bottom-color: #FFD700; }
@@ -242,19 +656,22 @@ ADMIN_DASHBOARD = '''
         .success { color: #00ff88; text-align: center; margin-top: 12px; font-size: 14px; }
         .error { color: #ff4444; text-align: center; margin-top: 12px; font-size: 14px; }
         .result-box { padding: 10px; margin-top: 10px; border-radius: 6px; }
+        .btn-users { background: #6c5ce7; color: white; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer; }
+        .btn-users:hover { background: #5a4bd1; }
+        .header-buttons { display: flex; gap: 10px; flex-wrap: wrap; }
+        .username-display { background: #0d0d1a; padding: 5px 15px; border-radius: 20px; border: 1px solid #FFD700; }
     </style>
 </head>
 <body>
 <div class="container">
     <div class="header">
         <div>
-            <div class="logo">UNIQUE MODS ONLINE</div>
-            <div class="user">Welcome, <span>{{ username }}</span> <span class="admin-badge">ADMIN</span></div>
+            <div class="logo">UNIQUE MODS</div>
+            <div class="user">Welcome, <span>{{ username }}</span></div>
         </div>
         <div class="header-buttons">
             <a href="/users"><button class="btn-users">Users</button></a>
             <a href="/telegram" target="_blank"><button class="btn-telegram">Join Updates</button></a>
-            <a href="/logout"><button class="logout-btn">Logout</button></a>
         </div>
     </div>
 
@@ -268,24 +685,14 @@ ADMIN_DASHBOARD = '''
 
     <div id="generate-tab" class="tab-content active">
         <div class="card">
-            <h2>Generate Random Key</h2>
-            <div class="input-group">
-                <input type="text" id="adminDevice" placeholder="Device ID" required>
-                <input type="text" id="adminExpire" placeholder="Expiry (e.g. 18-August-2026)" required>
-                <button onclick="adminGenerateKey()">Generate</button>
-            </div>
-            <div id="adminGenerateResult" class="result-box"></div>
-        </div>
-
-        <div class="card">
             <h2>Generate Custom Key</h2>
             <div class="input-group">
-                <input type="text" id="adminCustomDevice" placeholder="Device ID" required>
-                <input type="text" id="adminCustomExpire" placeholder="Expiry (e.g. 18-August-2026)" required>
-                <input type="text" id="adminCustomKey" placeholder="Enter Custom Key" required>
-                <button onclick="adminGenerateCustomKey()">Generate</button>
+                <input type="text" id="customDevice" placeholder="Device ID" required>
+                <input type="text" id="customExpire" placeholder="Expiry (e.g. 18-August-2026)" required>
+                <input type="text" id="customKeyInput" placeholder="Enter Custom Key" required>
+                <button onclick="generateCustomKey()">Generate</button>
             </div>
-            <div id="adminCustomResult" class="result-box"></div>
+            <div id="customResult" class="result-box"></div>
         </div>
     </div>
 
@@ -323,10 +730,10 @@ ADMIN_DASHBOARD = '''
             <h2>Use a Key</h2>
             <p>Enter a key to mark it as used</p>
             <div class="input-group">
-                <input type="text" id="adminUseKey" placeholder="Enter key to use" required>
-                <button onclick="adminUseKey()">Use Key</button>
+                <input type="text" id="useKeyInput" placeholder="Enter key to use" required>
+                <button onclick="useKey()">Use Key</button>
             </div>
-            <div id="adminUseResult" class="result-box"></div>
+            <div id="useResult" class="result-box"></div>
         </div>
     </div>
 
@@ -338,7 +745,7 @@ ADMIN_DASHBOARD = '''
     <div class="footer">
         Made by: <a href="https://t.me/+FsOBvTfVSjRlNmFl">Farhan Modz</a>
     </div>
-    <div class="made">UNIQUE MODS ONLINE &copy; 2026</div>
+    <div class="made">UNIQUE MODS &copy; 2026</div>
 </div>
 
 <script>
@@ -353,40 +760,11 @@ function showTab(tab) {
     }
 }
 
-function adminGenerateKey() {
-    const device = document.getElementById('adminDevice').value;
-    const expire = document.getElementById('adminExpire').value;
-    const resultDiv = document.getElementById('adminGenerateResult');
-    
-    if (!device || !expire) {
-        resultDiv.innerHTML = '<div class="error">Please fill all fields</div>';
-        return;
-    }
-    
-    resultDiv.innerHTML = '<p style="color:#FFD700;">Generating...</p>';
-    
-    fetch('/api/key/generate?device=' + encodeURIComponent(device) + '&expire=' + encodeURIComponent(expire))
-    .then(res => res.json())
-    .then(data => {
-        if (data.error) {
-            resultDiv.innerHTML = '<div class="error">Error: ' + data.error + '</div>';
-        } else {
-            resultDiv.innerHTML = '<div class="success">Key generated: <strong style="color:#00ff88;">' + data.key + '</strong><br>Device: ' + data.device + '<br>Expires: ' + data.expiry + '<br>Owner: ' + data.owner + '</div>';
-            document.getElementById('adminDevice').value = '';
-            document.getElementById('adminExpire').value = '';
-            loadAllKeys();
-        }
-    })
-    .catch(err => {
-        resultDiv.innerHTML = '<div class="error">Error: ' + err.message + '</div>';
-    });
-}
-
-function adminGenerateCustomKey() {
-    const device = document.getElementById('adminCustomDevice').value;
-    const expire = document.getElementById('adminCustomExpire').value;
-    const customKey = document.getElementById('adminCustomKey').value;
-    const resultDiv = document.getElementById('adminCustomResult');
+function generateCustomKey() {
+    const device = document.getElementById('customDevice').value;
+    const expire = document.getElementById('customExpire').value;
+    const customKey = document.getElementById('customKeyInput').value;
+    const resultDiv = document.getElementById('customResult');
     
     if (!device || !expire || !customKey) {
         resultDiv.innerHTML = '<div class="error">Please fill all fields</div>';
@@ -402,9 +780,9 @@ function adminGenerateCustomKey() {
             resultDiv.innerHTML = '<div class="error">Error: ' + data.error + '</div>';
         } else {
             resultDiv.innerHTML = '<div class="success">Custom key generated: <strong style="color:#00ff88;">' + data.key + '</strong><br>Device: ' + data.device + '<br>Expires: ' + data.expiry + '<br>Owner: ' + data.owner + '</div>';
-            document.getElementById('adminCustomDevice').value = '';
-            document.getElementById('adminCustomExpire').value = '';
-            document.getElementById('adminCustomKey').value = '';
+            document.getElementById('customDevice').value = '';
+            document.getElementById('customExpire').value = '';
+            document.getElementById('customKeyInput').value = '';
             loadAllKeys();
         }
     })
@@ -413,9 +791,9 @@ function adminGenerateCustomKey() {
     });
 }
 
-function adminUseKey() {
-    const key = document.getElementById('adminUseKey').value.trim();
-    const resultDiv = document.getElementById('adminUseResult');
+function useKey() {
+    const key = document.getElementById('useKeyInput').value.trim();
+    const resultDiv = document.getElementById('useResult');
     
     if (!key) {
         resultDiv.innerHTML = '<div class="error">Please enter a key</div>';
@@ -435,7 +813,7 @@ function adminUseKey() {
             resultDiv.innerHTML = '<div class="error">' + data.error + '</div>';
         } else {
             resultDiv.innerHTML = '<div class="success">Key used successfully!<br>Key: ' + data.key + '<br>Used by: ' + data.used_by + '<br>Used at: ' + data.used_at + '</div>';
-            document.getElementById('adminUseKey').value = '';
+            document.getElementById('useKeyInput').value = '';
             loadAllKeys();
         }
     })
@@ -515,7 +893,7 @@ USERS_PAGE = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>UNIQUE MODS ONLINE - Users</title>
+    <title>UNIQUE MODS - Users</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         * { margin:0; padding:0; box-sizing:border-box; }
@@ -530,7 +908,6 @@ USERS_PAGE = '''
         .user-item { background: #0d0d1a; padding: 12px 16px; border-radius: 6px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; border-left: 3px solid #6c5ce7; }
         .user-item .username { color: #00ff88; font-weight: bold; }
         .user-item .email { color: #888; font-size: 14px; }
-        .user-item .admin-badge { background: #FFD700; color: #0a0a0a; padding: 2px 10px; border-radius: 4px; font-size: 11px; font-weight: bold; }
         .delete-btn { background: #ff4444; color: white; border: none; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; }
         .delete-btn:hover { background: #cc0000; }
         .footer { text-align: center; margin-top: 30px; color: #444; font-size: 12px; }
@@ -541,7 +918,7 @@ USERS_PAGE = '''
 <div class="container">
     <div class="header">
         <div>
-            <div class="logo">UNIQUE MODS ONLINE</div>
+            <div class="logo">UNIQUE MODS</div>
             <div style="color: #888; font-size: 14px;">User Management</div>
         </div>
         <a href="/dashboard"><button class="back-btn">Back to Dashboard</button></a>
@@ -555,15 +932,10 @@ USERS_PAGE = '''
                 <div>
                     <span class="username">{{ user.username }}</span>
                     <span class="email">{{ user.email }}</span>
-                    {% if user.is_admin == 1 %}
-                    <span class="admin-badge">ADMIN</span>
-                    {% endif %}
                 </div>
                 <div style="display: flex; gap: 8px; align-items: center;">
                     <span style="color: #666; font-size: 12px;">Joined: {{ user.created_at[:10] }}</span>
-                    {% if user.is_admin != 1 %}
                     <button class="delete-btn" onclick="deleteUser('{{ user.id }}', '{{ user.username }}')">Delete</button>
-                    {% endif %}
                 </div>
             </div>
             {% else %}
@@ -603,18 +975,36 @@ function deleteUser(userId, username) {
 
 @app.route('/')
 def index():
-    # Auto login as admin
-    admin = get_user_by_email('admin@unique.com')
-    if admin:
-        session['user_id'] = admin['id']
-        session['username'] = admin['username']
-        session['email'] = admin['email']
+    # Check if user is already logged in
+    if is_logged_in():
+        return redirect('/dashboard')
+    return render_template_string(AGREE_PAGE)
+
+@app.route('/api/create-account', methods=['POST'])
+def create_account():
+    try:
+        # Create new user account
+        user = create_user_account()
+        
+        # Auto login
+        session['user_id'] = user['id']
+        session['username'] = user['username']
+        session['email'] = user['email']
         session['is_admin'] = True
-    return redirect('/dashboard')
+        
+        return jsonify({
+            'success': True,
+            'id': user['id'],
+            'username': user['username'],
+            'email': user['email'],
+            'password': user['password']
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/dashboard')
 def dashboard():
-    if 'user_id' not in session:
+    if not is_logged_in():
         return redirect('/')
     
     user = get_user_by_id(session['user_id'])
@@ -624,23 +1014,26 @@ def dashboard():
         return redirect('/')
     
     stats = get_stats()
-    return render_template_string(ADMIN_DASHBOARD,
-        username=session.get('username', 'Admin'),
+    return render_template_string(DASHBOARD,
+        username=session.get('username', 'User'),
         stats=stats
     )
 
 @app.route('/users')
 def list_users():
-    if 'user_id' not in session or not is_admin():
+    if not is_logged_in():
         return redirect('/')
     
     users = get_all_users()
     return render_template_string(USERS_PAGE, users=users)
 
-@app.route('/logout')
-def logout():
-    session.clear()
-    return redirect('/')
+@app.route('/privacy')
+def privacy():
+    return render_template_string(PRIVACY_PAGE)
+
+@app.route('/terms')
+def terms():
+    return render_template_string(TERMS_PAGE)
 
 @app.route('/telegram')
 def telegram():
@@ -651,19 +1044,19 @@ def telegram():
 @app.route('/api/connect', methods=['GET'])
 def api_connect():
     if not is_logged_in():
-        return jsonify({'error': 'Unauthorized - Please login first'}), 401
+        return jsonify({'error': 'Unauthorized'}), 401
     
     return jsonify({
         'status': 'online',
         'made_by': 'Farhan Modz',
         'user': session.get('username'),
-        'is_admin': is_admin()
+        'is_admin': True
     })
 
 @app.route('/api/key/generate', methods=['GET', 'POST'])
 def api_generate():
     if not is_logged_in():
-        return jsonify({'error': 'Unauthorized - Please login first'}), 401
+        return jsonify({'error': 'Unauthorized'}), 401
     
     if request.method == 'POST':
         data = request.get_json()
@@ -678,26 +1071,22 @@ def api_generate():
     if not device or not expiry:
         return jsonify({'error': 'Missing parameters: device and expire required'}), 400
     
-    chars = string.ascii_letters + string.digits
-    if custom_key:
-        key = ''.join(c for c in custom_key if c.isalnum())
-        if len(key) < 4:
-            return jsonify({'error': 'Key too short (min 4 chars)'}), 400
-    else:
-        key = ''.join(secrets.choice(chars) for _ in range(32))
+    if not custom_key:
+        return jsonify({'error': 'Custom key is required'}), 400
+    
+    key = ''.join(c for c in custom_key if c.isalnum())
+    if len(key) < 4:
+        return jsonify({'error': 'Key too short (min 4 chars)'}), 400
     
     try:
         expiry_date = datetime.strptime(expiry, '%d-%B-%Y')
         expiry = expiry_date.strftime('%d-%B-%Y')
     except:
-        expiry_date = datetime.now() + timedelta(days=30)
-        expiry = expiry_date.strftime('%d-%B-%Y')
+        return jsonify({'error': 'Invalid expiry format. Use DD-Month-YYYY (e.g. 18-August-2026)'}), 400
     
     existing = get_key_by_key(key)
     if existing:
-        if custom_key:
-            return jsonify({'error': 'Key already exists'}), 400
-        key = ''.join(secrets.choice(chars) for _ in range(32))
+        return jsonify({'error': 'Key already exists'}), 400
     
     try:
         username = session.get('username')
@@ -715,7 +1104,7 @@ def api_generate():
 @app.route('/api/key/use', methods=['POST'])
 def api_use_key():
     if not is_logged_in():
-        return jsonify({'error': 'Unauthorized - Please login first'}), 401
+        return jsonify({'error': 'Unauthorized'}), 401
     
     data = request.get_json()
     if not data:
@@ -729,10 +1118,6 @@ def api_use_key():
     
     if not key_record:
         return jsonify({'error': 'Key not found'}), 404
-    
-    # Admin can use any key, regular users can only use their own
-    if not is_admin() and key_record['user_id'] != session['user_id']:
-        return jsonify({'error': 'You are not the owner of this key'}), 403
     
     if key_record['used'] == 1:
         return jsonify({'error': 'Key already used'}), 400
@@ -751,10 +1136,7 @@ def api_use_key():
 @app.route('/api/keys/all', methods=['GET'])
 def api_all_keys():
     if not is_logged_in():
-        return jsonify({'error': 'Unauthorized - Please login first'}), 401
-    
-    if not is_admin():
-        return jsonify({'error': 'Admin only'}), 403
+        return jsonify({'error': 'Unauthorized'}), 401
     
     keys = get_all_keys()
     return jsonify({
@@ -765,10 +1147,7 @@ def api_all_keys():
 @app.route('/api/stats', methods=['GET'])
 def api_stats():
     if not is_logged_in():
-        return jsonify({'error': 'Unauthorized - Please login first'}), 401
-    
-    if not is_admin():
-        return jsonify({'error': 'Admin only'}), 403
+        return jsonify({'error': 'Unauthorized'}), 401
     
     stats = get_stats()
     return jsonify(stats)
@@ -776,10 +1155,7 @@ def api_stats():
 @app.route('/api/user/delete/<int:user_id>', methods=['DELETE'])
 def api_delete_user(user_id):
     if not is_logged_in():
-        return jsonify({'error': 'Unauthorized - Please login first'}), 401
-    
-    if not is_admin():
-        return jsonify({'error': 'Admin only'}), 403
+        return jsonify({'error': 'Unauthorized'}), 401
     
     if user_id == session.get('user_id'):
         return jsonify({'error': 'Cannot delete yourself'}), 400
@@ -793,10 +1169,7 @@ def api_delete_user(user_id):
 @app.route('/api/user/all', methods=['GET'])
 def api_all_users():
     if not is_logged_in():
-        return jsonify({'error': 'Unauthorized - Please login first'}), 401
-    
-    if not is_admin():
-        return jsonify({'error': 'Admin only'}), 403
+        return jsonify({'error': 'Unauthorized'}), 401
     
     users = get_all_users()
     return jsonify({
@@ -807,14 +1180,12 @@ def api_all_users():
 @app.route('/api/key/check/<key>', methods=['GET'])
 def api_check_key(key):
     if not is_logged_in():
-        return jsonify({'error': 'Unauthorized - Please login first'}), 401
+        return jsonify({'error': 'Unauthorized'}), 401
     
     key_record = get_key_by_key(key)
     
     if not key_record:
         return jsonify({'exists': False, 'message': 'Key not found'}), 404
-    
-    is_owner = key_record['user_id'] == session['user_id']
     
     return jsonify({
         'exists': True,
@@ -823,14 +1194,13 @@ def api_check_key(key):
         'expiry': key_record['expiry'],
         'used': bool(key_record['used']),
         'status': 'USED' if key_record['used'] == 1 else 'ACTIVE',
-        'owner': key_record['owner_username'],
-        'is_owner': is_owner
+        'owner': key_record['owner_username']
     })
 
 @app.route('/api/profile', methods=['GET'])
 def api_profile():
     if not is_logged_in():
-        return jsonify({'error': 'Unauthorized - Please login first'}), 401
+        return jsonify({'error': 'Unauthorized'}), 401
     
     user = get_user_by_id(session['user_id'])
     
@@ -844,7 +1214,6 @@ def api_profile():
         'id': user['id'],
         'username': user['username'],
         'email': user['email'],
-        'is_admin': bool(user['is_admin']),
         'created_at': user['created_at'],
         'keys_generated': len(keys)
     })
@@ -852,14 +1221,11 @@ def api_profile():
 @app.route('/api/key/history/<key>', methods=['GET'])
 def api_key_history(key):
     if not is_logged_in():
-        return jsonify({'error': 'Unauthorized - Please login first'}), 401
+        return jsonify({'error': 'Unauthorized'}), 401
     
     key_record = get_key_by_key(key)
     if not key_record:
         return jsonify({'error': 'Key not found'}), 404
-    
-    if key_record['user_id'] != session['user_id'] and not is_admin():
-        return jsonify({'error': 'Access denied - Not the owner'}), 403
     
     history = get_key_usage_history(key)
     return jsonify({
